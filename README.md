@@ -4,7 +4,7 @@ Run Lazy Edge trading bots on your own Windows computer, with your own keys, und
 
 ## Get the app
 
-**[Download the latest release](https://github.com/Web3kaneco/lazy-edge-app/releases/latest)** and pick one file:
+**[Download from the Releases page](https://github.com/Web3kaneco/lazy-edge-app/releases)**, open the newest release, and pick one file:
 
 | File | Use it when |
 |---|---|
