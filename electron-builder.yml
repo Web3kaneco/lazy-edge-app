@@ -1,0 +1,31 @@
+appId: net.lazyedge.desktop
+productName: Lazy Edge
+copyright: Copyright © 2026 Lazy Ventures Inc.
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+asar: true
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  # The installer and the portable build would otherwise share one file name
+  # and the second would overwrite the first.
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+# Unsigned for now (decision 15). Installed apps check the public repository's
+# GitHub releases for updates; they tell the user a new version exists and the
+# user installs it themselves until the build is signed.
+publish:
+  provider: github
+  owner: Web3kaneco
+  repo: lazy-edge-app
