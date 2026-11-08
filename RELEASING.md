@@ -30,7 +30,7 @@ Any change to `src/shared/terms.ts` must bump `TERMS_VERSION` in the same file. 
    npm run dist
    ```
 
-   This writes `Lazy Edge-Setup-<version>-x64.exe` (installer) and `Lazy Edge-<version>-x64.exe` (portable) to `dist/`, plus `latest.yml`, which the in app update check reads.
+   This writes `Lazy-Edge-Setup-<version>-x64.exe` (installer) and `Lazy-Edge-<version>-x64.exe` (portable) to `dist/`, plus `latest.yml`, which the in app update check reads.
 4. Tag the commit `v<version>` and push the tag.
 5. Create a GitHub release for the tag, marked **pre-release** while the version carries a beta tag. Upload both exe files and `latest.yml`. Write the notes in plain language: what changed, anything testers must do, and the beta warning.
 

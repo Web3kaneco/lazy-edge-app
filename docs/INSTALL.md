@@ -15,8 +15,8 @@ Download the latest version from the **Releases** page of this repository. Each 
 
 | File | Use it when |
 |---|---|
-| `Lazy Edge-Setup-<version>-x64.exe` | You want it installed, with a Start menu and desktop shortcut. |
-| `Lazy Edge-<version>-x64.exe` | You want a single portable file you run from anywhere. |
+| `Lazy-Edge-Setup-<version>-x64.exe` | You want it installed, with a Start menu and desktop shortcut. |
+| `Lazy-Edge-<version>-x64.exe` | You want a single portable file you run from anywhere. |
 
 Download only from this repository's Releases page. Never run a copy someone sends you directly.
 

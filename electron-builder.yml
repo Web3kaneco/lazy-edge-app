@@ -14,14 +14,14 @@ win:
       arch: [x64]
     - target: portable
       arch: [x64]
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  artifactName: Lazy-Edge-${version}-${arch}.${ext}
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   # The installer and the portable build would otherwise share one file name
   # and the second would overwrite the first.
-  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+  artifactName: Lazy-Edge-Setup-${version}-${arch}.${ext}
 # Unsigned for now (decision 15). Installed apps check the public repository's
 # GitHub releases for updates; they tell the user a new version exists and the
 # user installs it themselves until the build is signed.
