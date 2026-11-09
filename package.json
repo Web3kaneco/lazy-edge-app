@@ -13,7 +13,8 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
-    "dist": "electron-vite build && electron-builder --win"
+    "dist": "electron-vite build && electron-builder --win",
+    "downloads": "node scripts/downloads.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.133.0",

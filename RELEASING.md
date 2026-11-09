@@ -36,6 +36,14 @@ Any change to `src/shared/terms.ts` must bump `TERMS_VERSION` in the same file. 
 
 Builds are unsigned until a code signing certificate exists (docs/DECISIONS.md, decision 15).
 
+## Download counts
+
+```bash
+npm run downloads
+```
+
+This prints, for every release, how many times the installer and the portable file were downloaded, read from GitHub's own counters on the public releases. Update checks are counted separately: each one is a copy of the app reading `latest.yml` at startup, not a new user. The app itself sends no usage data anywhere.
+
 ## Never in a release or the repository
 
 1. Anything from `%APPDATA%\Lazy Edge` on the machine that built it: ledgers, settings, keys.
