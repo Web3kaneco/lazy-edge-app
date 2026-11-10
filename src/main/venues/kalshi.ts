@@ -62,6 +62,54 @@ export function kalshiBalance(b: Record<string, unknown>): { usd: number; equity
   return { usd, equity: usd + (dollars(b.portfolio_value_dollars, b.portfolio_value) ?? 0) }
 }
 
+const num = (v: unknown): number => (v === undefined || v === null || v === '' ? 0 : Number(v) || 0)
+const toC = (px: number): number => Math.round(px * 10000) / 100
+
+// The reply to POST /portfolio/events/orders (CreateOrderV2Response). Counts
+// are fixed point strings; average_fill_price is a book price, so in YES
+// terms, and a NO buy's cost is its complement. average_fee_paid is per
+// contract. Both are only present once something filled.
+export function kalshiPlaced(res: Record<string, any>, side: ContractSide, wanted: number): Omit<PlaceResult, 'ok' | 'venueOrderId' | 'error'> {
+  const filled = num(res.fill_count)
+  const remaining = res.remaining_count === undefined ? Math.max(wanted - filled, 0) : num(res.remaining_count)
+  const yes = res.average_fill_price === undefined || res.average_fill_price === null ? null : Number(res.average_fill_price)
+  const px = filled > 0 && yes !== null ? (side === 'yes' ? yes : 1 - yes) : null
+  const feeUsd = res.average_fee_paid !== undefined && res.average_fee_paid !== null ? num(res.average_fee_paid) * filled : px !== null ? kalshiFee(px, filled) : 0
+  return {
+    status: filled > 0 && remaining <= 0 ? 'filled' : filled > 0 ? 'partial' : 'resting',
+    filledContracts: filled,
+    avgFillC: px === null ? null : toC(px),
+    feeUsd: Math.round(feeUsd * 10000) / 10000
+  }
+}
+
+// An order's state after placing, from Kalshi's own record: the Order from
+// GET /portfolio/orders and its fills from GET /portfolio/fills. The fills
+// carry the price on each side outright, so they decide the average price and
+// the fee; the order's fill cost is the fallback when no fill is listed yet.
+// Kalshi's statuses are resting, canceled and executed.
+export function kalshiOrderUpdate(order: Record<string, any>, fills: Record<string, any>[], side: ContractSide): OrderUpdate {
+  const filled = num(order.fill_count_fp)
+  const mine = fills.filter((f) => !f.order_id || f.order_id === order.order_id)
+  const fillCount = mine.reduce((n, f) => n + num(f.count_fp), 0)
+  let px: number | null = null
+  let feeUsd: number
+  if (fillCount > 0) {
+    px = mine.reduce((s, f) => s + num(f.count_fp) * num(side === 'yes' ? f.yes_price_dollars : f.no_price_dollars), 0) / fillCount
+    feeUsd = mine.reduce((s, f) => s + num(f.fee_cost), 0)
+  } else {
+    if (filled > 0) px = (num(order.taker_fill_cost_dollars) + num(order.maker_fill_cost_dollars)) / filled
+    feeUsd = num(order.taker_fees_dollars) + num(order.maker_fees_dollars)
+  }
+  const st = String(order.status ?? '').toLowerCase()
+  return {
+    status: st === 'executed' ? 'filled' : st === 'canceled' || st === 'cancelled' ? (filled > 0 ? 'partial' : 'cancelled') : filled > 0 ? 'partial' : 'resting',
+    filledContracts: filled,
+    avgFillC: px === null ? null : toC(px),
+    feeUsd: Math.round(feeUsd * 10000) / 10000
+  }
+}
+
 // Signs timestamp_ms + METHOD + the path without its query. The timestamp is
 // milliseconds; seconds is a silent 401. Kalshi issues two key types and the
 // PEM header does not say which, so the parsed key decides: Ed25519 signs the
@@ -229,55 +277,31 @@ export class KalshiVenue implements Venue {
         client_order_id: order.idempotencyKey
       })
       this.balance = null
-      return { ok: true, ...this.readOrder(res.order ?? res, order.side, order.contracts), venueOrderId: String((res.order ?? res).order_id ?? '') || null, error: null }
+      return { ok: true, ...kalshiPlaced(res, order.side, order.contracts), venueOrderId: String(res.order_id ?? '') || null, error: null }
     } catch (err) {
       return reject((err as Error).message)
     }
   }
 
-  private readOrder(o: Record<string, any>, side: ContractSide, wanted: number): Omit<PlaceResult, 'ok' | 'venueOrderId' | 'error'> {
-    const filled = Number(o.fill_count ?? 0)
-    const remaining = Number(o.remaining_count ?? Math.max(wanted - filled, 0))
-    // average_fill_price is in YES terms; a NO buy's cost is the complement.
-    const yes = o.average_fill_price === undefined || o.average_fill_price === null ? null : Number(o.average_fill_price)
-    const px = filled > 0 && yes !== null ? (side === 'yes' ? yes : 1 - yes) : null
-    const feeReported = o.taker_fees_dollars ?? o.taker_fees
-    const feeUsd = feeReported !== undefined ? Number(feeReported) / (o.taker_fees_dollars !== undefined ? 1 : 100) : px !== null ? kalshiFee(px, filled) : 0
-    return {
-      status: filled > 0 && remaining <= 0 ? 'filled' : filled > 0 ? 'partial' : 'resting',
-      filledContracts: filled,
-      avgFillC: px === null ? null : Math.round(px * 10000) / 100,
-      feeUsd
-    }
-  }
-
+  // The V2 API has no read by order id, so the order is found in the market's
+  // order list. Leaving exchange_index off searches every shard. Null when
+  // Kalshi does not list it, and the caller keeps the ticket as it was.
   async status(id: string, order: { contract: string; side: ContractSide }): Promise<OrderUpdate | null> {
     if (id.startsWith('dryrun')) return null
-    // A GET by id carries no ticker, so routing cannot apply. Ask the market's
-    // own shard first, then the bare path.
-    const shard = await this.shardOf(order.contract)
-    const queries = [shard !== null && shard !== 0 ? `?exchange_index=${shard}` : '', '']
-    for (const q of queries) {
-      try {
-        const res = await this.authed<Record<string, any>>('GET', `/portfolio/events/orders/${encodeURIComponent(id)}`, undefined, q)
-        const o = res.order ?? res
-        const read = this.readOrder(o, order.side, Number(o.initial_count ?? o.count ?? 0))
-        const st = String(o.status ?? '').toLowerCase()
-        const closed = ['canceled', 'cancelled', 'expired'].includes(st)
-        return {
-          status: read.status === 'filled' ? 'filled' : closed ? (read.filledContracts > 0 ? 'partial' : 'cancelled') : read.status === 'partial' ? 'partial' : 'resting',
-          filledContracts: read.filledContracts,
-          avgFillC: read.avgFillC,
-          feeUsd: read.feeUsd
-        }
-      } catch { /* try the next path */ }
-    }
-    return null
+    const list = await this.authed<{ orders?: Record<string, any>[] }>('GET', '/portfolio/orders', undefined, `?ticker=${encodeURIComponent(order.contract)}&limit=200`)
+    const o = (list.orders ?? []).find((x) => x.order_id === id)
+    if (!o) return null
+    const fills = num(o.fill_count_fp) > 0
+      ? (await this.authed<{ fills?: Record<string, any>[] }>('GET', '/portfolio/fills', undefined, `?order_id=${encodeURIComponent(id)}&limit=200`)).fills ?? []
+      : []
+    return kalshiOrderUpdate(o, fills, order.side)
   }
 
-  async cancel(id: string): Promise<void> {
+  // An order id alone cannot name the shard; the market ticker with
+  // exchange_index -1 makes Kalshi route the cancel to the right one.
+  async cancel(id: string, contract: string): Promise<void> {
     if (id.startsWith('dryrun')) return
-    await this.authed('DELETE', `/portfolio/events/orders/${encodeURIComponent(id)}`)
+    await this.authed('DELETE', `/portfolio/events/orders/${encodeURIComponent(id)}`, undefined, `?market_ticker=${encodeURIComponent(contract)}&exchange_index=-1`)
   }
 
   // Public market read. Kalshi publishes the settled side as `result`.

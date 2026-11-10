@@ -138,7 +138,7 @@ export class Supervisor extends EventEmitter {
     for (const t of ledger.tickets(2)) {
       if ((t.status !== 'resting' && t.status !== 'partial') || !t.venueOrderId || t.venue === 'paper') continue
       try {
-        await this.venues[t.venue].cancel(t.venueOrderId)
+        await this.venues[t.venue].cancel(t.venueOrderId, t.contract)
         this.update(t, { status: t.filledContracts > 0 ? 'partial' : 'cancelled', venueOrderId: null })
       } catch (err) {
         this.log(t.botId, t.botName, t.title, 'cancel_failed', (err as Error).message)
@@ -453,7 +453,7 @@ export class Supervisor extends EventEmitter {
     // The kill switch pressed while the order was in flight: pull what rests.
     if (d.venue !== 'paper' && res.venueOrderId && (res.status === 'resting' || res.status === 'partial') && settingsStore.account().killSwitch) {
       try {
-        await this.venues[d.venue].cancel(res.venueOrderId)
+        await this.venues[d.venue].cancel(res.venueOrderId, ticket.contract)
         this.update(ticket, { status: res.filledContracts > 0 ? 'partial' : 'cancelled', venueOrderId: null })
       } catch (err) { this.log(bot.id, bot.name, signal.title, 'cancel_failed', (err as Error).message) }
     }
@@ -480,7 +480,7 @@ export class Supervisor extends EventEmitter {
           // venue did not honour it.
           const bot = settingsStore.bots().find((b) => b.id === t.botId)
           if (t.status === 'resting' && bot && Date.now() - t.createdAt > (bot.guards.autoCancelS + 30) * 1000) {
-            await venue.cancel(t.venueOrderId)
+            await venue.cancel(t.venueOrderId, t.contract)
             this.update(t, { status: t.filledContracts > 0 ? 'partial' : 'cancelled' })
             continue
           }

@@ -41,7 +41,7 @@ export interface Venue {
   state(): Promise<VenueState>
   place(order: TradeDecision): Promise<PlaceResult>
   status(venueOrderId: string, order: { contract: string; side: ContractSide }): Promise<OrderUpdate | null>
-  cancel(venueOrderId: string): Promise<void>
+  cancel(venueOrderId: string, contract: string): Promise<void>
   // A read only call that proves the credentials work, for the keys screen.
   test(): Promise<{ ok: boolean; detail: string }>
   // How the contract settled, from the venue's own record. Null while open.
