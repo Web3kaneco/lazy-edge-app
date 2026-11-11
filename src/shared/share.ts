@@ -32,6 +32,10 @@ export function readShareCode(code: string, id: string): BotSettings {
 
 export interface Change { field: string; from: unknown; to: unknown }
 
+// Lists of names (sports, lanes, venues) mean the same in any order. Number
+// pairs such as the price band keep theirs.
+const asSet = (v: unknown): unknown => Array.isArray(v) && v.every((x) => typeof x === 'string') ? [...v].sort() : v
+
 // Every setting that differs from the measured defaults, so an imported bot
 // is read before it is saved.
 export function changesFromDefaults(bot: BotSettings): Change[] {
@@ -39,7 +43,7 @@ export function changesFromDefaults(bot: BotSettings): Change[] {
   const walk = (a: unknown, b: unknown, path: string): void => {
     if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a)) {
       for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) walk((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], path ? `${path}.${k}` : k)
-    } else if (JSON.stringify(a) !== JSON.stringify(b)) {
+    } else if (JSON.stringify(asSet(a)) !== JSON.stringify(asSet(b))) {
       out.push({ field: path, from: a, to: b })
     }
   }

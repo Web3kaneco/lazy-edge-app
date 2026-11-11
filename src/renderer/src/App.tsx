@@ -9,17 +9,20 @@ import { Keys } from './screens/Keys'
 import { Ledger } from './screens/Ledger'
 import { SignIn } from './screens/SignIn'
 import { Help } from './screens/Help'
+import { Report } from './screens/Report'
 import { Results } from './screens/Results'
 import { Terms } from './screens/Terms'
 import { BrandMark } from './ui'
 
-const SCREENS = ['Dashboard', 'Bots', 'Board', 'Results', 'Ledger', 'Keys', 'Account', 'Help', 'Terms'] as const
+const SCREENS = ['Dashboard', 'Bots', 'Board', 'Results', 'Ledger', 'Keys', 'Account', 'Help', 'Report', 'Terms'] as const
 type Screen = (typeof SCREENS)[number]
 
 export function App() {
   const [signedIn, setSignedIn] = useState<boolean | null>(null)
   const [tier, setTier] = useState('')
   const [screen, setScreen] = useState<Screen>('Dashboard')
+  // The play a ledger row asked to report, carried to the Report screen.
+  const [reportTicket, setReportTicket] = useState<string | null>(null)
   const [account, setAccount] = useState<AccountSettings | null>(null)
   const [bootError, setBootError] = useState('')
   const [termsAt, setTermsAt] = useState<string | null | undefined>(undefined)
@@ -110,10 +113,11 @@ export function App() {
             {screen === 'Bots' && <Bots />}
             {screen === 'Board' && <Board engine={engine} />}
             {screen === 'Results' && <Results />}
-            {screen === 'Ledger' && <Ledger />}
+            {screen === 'Ledger' && <Ledger onReport={(id) => { setReportTicket(id); setScreen('Report') }} />}
             {screen === 'Keys' && <Keys />}
             {screen === 'Account' && account && <Account account={account} onSaved={setAccount} onSignOut={refresh} />}
             {screen === 'Help' && <Help />}
+            {screen === 'Report' && <Report ticketId={reportTicket} />}
             {screen === 'Terms' && <Terms acceptedAt={termsAt} />}
           </main>
         </div>

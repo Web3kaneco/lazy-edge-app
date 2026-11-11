@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { defaultBot } from '@shared/ruleset'
-import { Lane, Phase, ProviderId, Sport, TradeableLabel, VenueId, type BotSettings } from '@shared/schema'
+import { limitsSummary } from '@shared/limits'
+import { Lane, Phase, ProviderId, Sport, TradeableLabel, VenueId, type AccountSettings, type BotSettings } from '@shared/schema'
 import { changesFromDefaults, readShareCode, shareCode, type Change } from '@shared/share'
 import { STARTERS, starterOf } from '@shared/starters'
 import { api, type StrategyResult } from '../api'
@@ -16,7 +17,9 @@ export function Bots() {
   const [err, setErr] = useState('')
   const [saved, setSaved] = useState('')
   const [sharing, setSharing] = useState(false)
+  const [account, setAccount] = useState<AccountSettings | null>(null)
   useEffect(() => setSharing(false), [edit?.id])
+  useEffect(() => { void api.account().then(setAccount) }, [])
 
   const load = async (select?: string): Promise<void> => {
     const list = await api.bots()
@@ -162,7 +165,7 @@ export function Bots() {
               <NumberField label="Bankroll" tip={tip('Bankroll')} suffix="$, 0 = live balance" step={10} value={edit.size.bankrollUsd} measured={M.size.bankrollUsd} why="Kelly rides the real balance, the 2026-07-23 fluid bankroll." onChange={(v) => set((b) => { b.size.bankrollUsd = v })} />
               <NumberField label="Maximum per trade" tip={tip('Maximum per trade')} suffix="$" step={1} value={edit.size.maxTradeUsd} measured={M.size.maxTradeUsd} why="MLB_MAX_TRADE_USD." onChange={(v) => set((b) => { b.size.maxTradeUsd = v })} />
               <NumberField label="Minimum per trade" tip={tip('Minimum per trade')} suffix="$" step={0.5} value={edit.size.minTradeUsd} measured={M.size.minTradeUsd} why="Below this a trade cannot pay its own fee." onChange={(v) => set((b) => { b.size.minTradeUsd = v })} />
-              <NumberField label="Maximum contracts" tip={tip('Maximum contracts')} value={edit.size.maxContracts} measured={M.size.maxContracts} onChange={(v) => set((b) => { b.size.maxContracts = v })} />
+              <NumberField label="Maximum contracts per trade" tip={tip('Maximum contracts per trade')} value={edit.size.maxContracts} measured={M.size.maxContracts} onChange={(v) => set((b) => { b.size.maxContracts = v })} />
               <NumberField label="Maximum share of equity per game" tip={tip('Maximum share of equity per game')} step={0.05} min={0} max={1} value={edit.size.maxGameEquityPct} measured={M.size.maxGameEquityPct} why="The 255 contract single game positions." onChange={(v) => set((b) => { b.size.maxGameEquityPct = v })} />
             </div>
 
@@ -178,6 +181,7 @@ export function Bots() {
               <Toggle on={edit.guards.onePositionPerMarket} onChange={(v) => set((b) => { b.guards.onePositionPerMarket = v })} label={<>One position per market<Tip text={tip('One position per market')} /></>} />
             </div>
             <p className="small muted" style={{ marginTop: 12 }}>Every position is held to settlement in this version.<Tip text={tip('Hold to settlement')} /></p>
+            {account && <Limits bot={edit} account={account} />}
 
             <div className="row" style={{ marginTop: 18 }}>
               <button className="btn primary" disabled={!dirty} onClick={() => save()}>Save settings</button>
@@ -193,6 +197,18 @@ export function Bots() {
         )}
       </div>
     </>
+  )
+}
+
+// What the size and guard settings add up to, as they are edited.
+function Limits({ bot, account }: { bot: BotSettings; account: AccountSettings }) {
+  const { lines, warnings } = limitsSummary(bot, account)
+  return (
+    <div className="note" style={{ marginTop: 14 }}>
+      <b>What these limits add up to</b>
+      <ul className="limits small" style={{ marginTop: 6 }}>{lines.map((l) => <li key={l}>{l}</li>)}</ul>
+      {warnings.map((w) => <div key={w} className="note warn small" style={{ marginTop: 8 }}>{w}</div>)}
+    </div>
   )
 }
 

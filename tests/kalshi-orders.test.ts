@@ -56,7 +56,7 @@ describe('Kalshi order after placing (Order and Fill)', () => {
       { order_id: 'ord-1', count_fp: '4.00', yes_price_dollars: '0.4500', no_price_dollars: '0.5500', fee_cost: '0.0700' }
     ]
     const u = kalshiOrderUpdate(order({ status: 'executed', fill_count_fp: '10.00', remaining_count_fp: '0.00' }), fills, 'yes')
-    expect(u).toEqual({ status: 'filled', filledContracts: 10, avgFillC: 44.4, feeUsd: 0.17 })
+    expect(u).toEqual({ status: 'filled', filledContracts: 10, avgFillC: 44.4, feeUsd: 0.17, done: true })
   })
   it('prices a NO order from the NO side of each fill', () => {
     const fills = [{ order_id: 'ord-1', count_fp: '5.00', yes_price_dollars: '0.6800', no_price_dollars: '0.3200', fee_cost: '0.0800' }]
@@ -65,11 +65,13 @@ describe('Kalshi order after placing (Order and Fill)', () => {
   it('an expired order with some fills is partial, with none cancelled', () => {
     const fills = [{ order_id: 'ord-1', count_fp: '3.00', yes_price_dollars: '0.4500', no_price_dollars: '0.5500', fee_cost: '0.0500' }]
     expect(kalshiOrderUpdate(order({ status: 'canceled', fill_count_fp: '3.00', remaining_count_fp: '0.00' }), fills, 'yes').status).toBe('partial')
-    expect(kalshiOrderUpdate(order({ status: 'canceled' }), [], 'yes')).toEqual({ status: 'cancelled', filledContracts: 0, avgFillC: null, feeUsd: 0 })
+    // Cancelled with fills can fill no further, so its cost becomes what filled.
+    expect(kalshiOrderUpdate(order({ status: 'canceled', fill_count_fp: '3.00', remaining_count_fp: '0.00' }), fills, 'yes').done).toBe(true)
+    expect(kalshiOrderUpdate(order({ status: 'canceled' }), [], 'yes')).toEqual({ status: 'cancelled', filledContracts: 0, avgFillC: null, feeUsd: 0, done: true })
   })
   it('uses the order fill cost when no fill is listed yet', () => {
     const u = kalshiOrderUpdate(order({ status: 'resting', fill_count_fp: '2.00', remaining_count_fp: '8.00', taker_fill_cost_dollars: '0.9000', taker_fees_dollars: '0.0300' }), [], 'yes')
-    expect(u).toEqual({ status: 'partial', filledContracts: 2, avgFillC: 45, feeUsd: 0.03 })
+    expect(u).toEqual({ status: 'partial', filledContracts: 2, avgFillC: 45, feeUsd: 0.03, done: false })
   })
 })
 
@@ -83,7 +85,7 @@ describe('Kalshi venue requests', () => {
       'GET /portfolio/fills': { fills: [{ order_id: 'ord-1', count_fp: '10.00', yes_price_dollars: '0.4500', no_price_dollars: '0.5500', fee_cost: '0.1700' }], cursor: '' }
     }
     const u = await venue.status('ord-1', { contract: 'KXNFLGAME-99JAN01CHISEA-SEA', side: 'yes' })
-    expect(u).toEqual({ status: 'filled', filledContracts: 10, avgFillC: 45, feeUsd: 0.17 })
+    expect(u).toEqual({ status: 'filled', filledContracts: 10, avgFillC: 45, feeUsd: 0.17, done: true })
     expect(calls[0]!.url).toContain('/portfolio/orders?ticker=KXNFLGAME-99JAN01CHISEA-SEA')
     expect(calls[0]!.url).not.toContain('exchange_index')
     expect(calls[1]!.url).toContain('/portfolio/fills?order_id=ord-1')

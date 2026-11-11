@@ -106,7 +106,8 @@ export function kalshiOrderUpdate(order: Record<string, any>, fills: Record<stri
     status: st === 'executed' ? 'filled' : st === 'canceled' || st === 'cancelled' ? (filled > 0 ? 'partial' : 'cancelled') : filled > 0 ? 'partial' : 'resting',
     filledContracts: filled,
     avgFillC: px === null ? null : toC(px),
-    feeUsd: Math.round(feeUsd * 10000) / 10000
+    feeUsd: Math.round(feeUsd * 10000) / 10000,
+    done: st === 'executed' || st === 'canceled' || st === 'cancelled'
   }
 }
 

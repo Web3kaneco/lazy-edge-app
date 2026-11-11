@@ -1,15 +1,27 @@
 import { useEffect, useState } from 'react'
+import { tradingDay } from '@shared/day'
+import { heldNote } from '@shared/limits'
+import type { AccountSettings, BotSettings } from '@shared/schema'
 import { ago, api, usd, type EngineState, type Ticket } from '../api'
+import { Tip } from '../ui'
 
 export function Dashboard({ engine }: { engine: EngineState | null }) {
   const [tickets, setTickets] = useState<Ticket[]>([])
+  const [account, setAccount] = useState<AccountSettings | null>(null)
+  const [bots, setBots] = useState<BotSettings[]>([])
   useEffect(() => {
-    void api.tickets(1).then(setTickets)
-    return window.lazyedge.on('ticket', () => void api.tickets(1).then(setTickets))
+    // Two days, so a trading day that started before yesterday's 4 AM is whole.
+    void api.tickets(2).then(setTickets)
+    return window.lazyedge.on('ticket', () => void api.tickets(2).then(setTickets))
   }, [])
+  // The notes quote the settings, so they follow any change made elsewhere.
+  useEffect(() => {
+    void api.account().then(setAccount)
+    void api.bots().then(setBots)
+  }, [engine?.lastCycleAt, engine?.limits.capUsd])
 
-  const day = new Date().toISOString().slice(0, 10)
-  const todays = tickets.filter((t) => new Date(t.createdAt).toISOString().slice(0, 10) === day)
+  const day = tradingDay()
+  const todays = tickets.filter((t) => tradingDay(t.createdAt) === day)
   const pnl = (venue: (v: string) => boolean): number => todays.filter((t) => venue(t.venue)).reduce((s, t) => s + (t.pnlUsd ?? 0), 0)
   const open = tickets.filter((t) => t.pnlUsd === null && ['resting', 'filled', 'partial'].includes(t.status))
 
@@ -41,12 +53,14 @@ export function Dashboard({ engine }: { engine: EngineState | null }) {
         <div className="card">
           <h2>Today's profit</h2>
           <div className={`stat ${pnl((v) => v !== 'paper') < 0 ? 'bad' : ''}`}>{usd(pnl((v) => v !== 'paper'))}</div>
-          <div className="stat-label">real money, settled · paper {usd(pnl((v) => v === 'paper'))} · {open.length} trades still open</div>
+          <div className="stat-label has-tip" data-tip="The trading day runs from 4 AM to 4 AM your time, so a late game counts with the night it started.">real money, settled since 4 AM · paper {usd(pnl((v) => v === 'paper'))} · {open.length} trades still open</div>
         </div>
       </div>
 
+      {engine && account && <InPlay limits={engine.limits} account={account} bots={bots} />}
+
       <div className="card" style={{ marginTop: 14 }}>
-        <h2>Decisions <span className="muted small">· {engine?.signals ?? 0} signals last cycle · {ago(engine?.lastCycleAt ?? null)}</span></h2>
+        <h2>Decisions<span className="muted small">· {engine?.signals ?? 0} signals last cycle · {ago(engine?.lastCycleAt ?? null)}</span></h2>
         {!engine?.recent.length ? (
           <p className="muted">Nothing yet. Create a bot, switch it on, and start the engine.</p>
         ) : (
@@ -67,5 +81,37 @@ export function Dashboard({ engine }: { engine: EngineState | null }) {
         )}
       </div>
     </>
+  )
+}
+
+// How much real money is open against the account limit, and every play a
+// limit held back today with the setting that did it.
+function InPlay({ limits: l, account, bots }: { limits: EngineState['limits']; account: AccountSettings; bots: BotSettings[] }) {
+  const share = l.capUsd > 0 ? Math.min(l.openLiveUsd / l.capUsd, 1) : 1
+  const live = l.liveBots > 0 || l.openLiveUsd > 0
+  return (
+    <div className="card" style={{ marginTop: 14 }}>
+      <h2>Money in play<Tip text="Real money in open trades across every live bot, against the Maximum open exposure on the Account screen. That limit, not the number of trades, is what caps how much is in play. Trades free their money when they settle." /></h2>
+      {live ? (
+        <>
+          <div className={`meter ${share >= 0.9 ? 'full' : ''}`}><div style={{ width: `${share * 100}%` }} /></div>
+          <div className="stat-label">
+            {usd(l.openLiveUsd)} of {usd(l.capUsd)} open across live bots · {usd(Math.max(l.capUsd - l.openLiveUsd, 0))} free
+            {l.dryRun ? ' · dry run is on, so no new real trades open' : ''}
+          </div>
+        </>
+      ) : (
+        <p className="small muted" style={{ margin: 0 }}>No live bot is switched on. Paper bots trade practice money, so the account limit does not apply to them.</p>
+      )}
+      {l.held.length > 0 ? (
+        <div className="grid" style={{ marginTop: 12, gap: 8 }}>
+          {l.held.map((h) => (
+            <div key={`${h.botId}|${h.gate}`} className="note warn small">{heldNote(h, account, bots.find((b) => b.id === h.botId))}</div>
+          ))}
+        </div>
+      ) : (
+        <p className="small muted" style={{ margin: '10px 0 0' }}>No limit has held a play back today.</p>
+      )}
+    </div>
   )
 }

@@ -1,6 +1,7 @@
 // The local record: every decision, order and fill, append only, one JSON line
 // per event, one file per UTC day. Nothing is rewritten, so the record of what
-// a bot did can always be audited against what the venue says it did.
+// a bot did can always be audited against what the venue says it did. The
+// file split is storage only; daily limits use the trading day (shared/day.ts).
 //
 // The files are read once at start up. After that the latest state of every
 // ticket lives in memory and each append updates it, so the trading loop
@@ -8,6 +9,7 @@
 import { app } from 'electron'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import type { PlayRules } from '@shared/review'
 import type { ContractSide, PlayTags } from '@shared/signal'
 import type { VenueId } from '@shared/schema'
 
@@ -42,6 +44,9 @@ export interface Ticket {
   // What kind of play this was, for the Results screen. Missing on tickets
   // written before 2026-11-06; results.tagsOf() reads those from the key.
   play?: PlayTags
+  // The bot's entry and size rules when it placed, so a play check judges it
+  // by the rules it ran under. Missing on tickets before 0.3.0-beta.1.
+  rules?: PlayRules
 }
 
 export type LedgerEvent =

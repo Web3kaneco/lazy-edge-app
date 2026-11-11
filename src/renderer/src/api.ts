@@ -2,6 +2,8 @@
 // no trading decision; it renders state and sends intents.
 import { useEffect, useState } from 'react'
 import type { AccuracyEntry } from '@shared/accuracy'
+import type { HeldBack } from '@shared/limits'
+import type { PlayReview } from '@shared/review'
 import type { AccountSettings, BotSettings, ProviderId } from '@shared/schema'
 import type { BotVerdict, PlayTags, Signal } from '@shared/signal'
 
@@ -21,6 +23,7 @@ export interface EngineState {
   refused: { source: string; reason: string; count: number }[]
   venues: Record<string, { balanceUsd: number | null; equityUsd: number | null; configured: boolean }>
   recent: { at: number; botId: string; botName: string; title: string; outcome: string; detail: string }[]
+  limits: { openLiveUsd: number; capUsd: number; liveBots: number; dryRun: boolean; held: HeldBack[] }
 }
 
 export interface BoardData {
@@ -67,7 +70,17 @@ export const api = {
   draft: (sentence: string, provider: ProviderId, model?: string) => c<StrategyResult>('bots:draft', sentence, provider, model),
   tickets: (days = 7) => c<Ticket[]>('ledger:tickets', days),
   accuracy: () => c<AccuracyState>('accuracy:get'),
-  runAccuracy: () => c<AccuracyState>('accuracy:run')
+  runAccuracy: () => c<AccuracyState>('accuracy:run'),
+  checkPlay: (id: string) => c<PlayReview>('play:check', id),
+  reportContext: () => c<ReportContext>('report:context'),
+  emailReport: (subject: string, text: string) => c<{ full: boolean }>('report:email', subject, text),
+  saveReport: (text: string) => c<string | null>('report:save', text)
+}
+
+export interface ReportContext {
+  os: string
+  supportEmail: string
+  problems: EngineState['recent']
 }
 
 export interface AccuracyState {

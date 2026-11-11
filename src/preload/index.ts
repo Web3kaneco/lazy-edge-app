@@ -11,7 +11,8 @@ const CHANNELS = [
   'settings:account', 'settings:saveAccount',
   'bots:list', 'bots:new', 'bots:save', 'bots:delete', 'bots:draft',
   'ledger:tickets', 'ledger:events',
-  'accuracy:get', 'accuracy:run', 'clipboard:write'
+  'accuracy:get', 'accuracy:run', 'clipboard:write',
+  'play:check', 'report:context', 'report:email', 'report:save'
 ] as const
 
 type Channel = (typeof CHANNELS)[number]

@@ -1,13 +1,17 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron'
+import { writeFileSync } from 'node:fs'
+import { release } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
+import { mailtoUrl, REPORT_MAX } from '@shared/report'
 import { defaultBot } from '@shared/ruleset'
 import type { ProviderId } from '@shared/schema'
 import { draftStrategy } from './ai/strategy'
 import { ai, allProviders } from './ai/registry'
 import { accuracy } from './bots/accuracy'
+import { checkPlay } from './bots/review'
 import { Supervisor } from './bots/supervisor'
-import { RELEASES_URL } from './config'
+import { RELEASES_URL, SUPPORT_EMAIL } from './config'
 import { auth } from './data/auth'
 import { lazyedge } from './data/lazyedge'
 import { ledger } from './store/ledger'
@@ -187,6 +191,36 @@ function registerIpc(): void {
   handle('accuracy:run', async () => { await accuracy.run(supervisor.venues.kalshi as KalshiVenue, ledger.tickets(30)); return accuracy.state() })
   // Reads day files from disk, so capped at a month.
   handle('ledger:events', (days?: number) => ledger.events(Math.min(Number(days) || 1, 31)))
+  // Read only: one ticket against Kalshi's public record and its bot's rules.
+  handle('play:check', (id: string) => {
+    const history = ledger.tickets(3650)
+    const t = history.find((x) => x.id === String(id))
+    if (!t) throw new Error('That play is no longer in the ledger.')
+    return checkPlay(t, settingsStore.bots().find((b) => b.id === t.botId) ?? null, supervisor.venues.kalshi as KalshiVenue, history)
+  })
+
+  // Reports leave only through the user's own email program, addressed here
+  // and never by the page. The full text goes on the clipboard too, since a
+  // mailto link holds only about 2,000 characters.
+  handle('report:context', () => ({
+    os: `Windows ${release()} ${process.arch}`,
+    supportEmail: SUPPORT_EMAIL,
+    problems: supervisor.state.recent.filter((e) => /rejected|failed|error/.test(e.outcome)).slice(0, 20)
+  }))
+  handle('report:email', async (subject: string, text: string) => {
+    const report = String(text).slice(0, REPORT_MAX)
+    clipboard.writeText(report)
+    const { url, full } = mailtoUrl(SUPPORT_EMAIL, String(subject).slice(0, 160), report)
+    await shell.openExternal(url)
+    return { full }
+  })
+  handle('report:save', async (text: string) => {
+    const name = `Lazy-Edge-report-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.txt`
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, { title: 'Save report', defaultPath: join(app.getPath('documents'), name), filters: [{ name: 'Text', extensions: ['txt'] }] })
+    if (canceled || !filePath) return null
+    writeFileSync(filePath, String(text).slice(0, REPORT_MAX))
+    return filePath
+  })
 }
 
 app.whenReady().then(async () => {

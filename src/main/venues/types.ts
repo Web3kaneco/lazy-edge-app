@@ -30,6 +30,9 @@ export interface OrderUpdate {
   filledContracts: number
   avgFillC: number | null
   feeUsd: number | null
+  // The order can fill no further: executed, or cancelled with or without
+  // fills. A partial fill still on the book is not done.
+  done?: boolean
 }
 
 export interface Venue {

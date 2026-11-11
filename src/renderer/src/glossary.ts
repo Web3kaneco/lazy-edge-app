@@ -67,7 +67,7 @@ export const GLOSSARY: Section[] = [
       t('Bankroll', 'The money Kelly sizes against. 0 uses the venue\'s live balance, so bets shrink after losses and grow after wins.'),
       t('Maximum per trade', 'No single trade costs more than this.'),
       t('Minimum per trade', 'A trade smaller than this is rounded up to it, because a tiny trade cannot pay its own fee.'),
-      t('Maximum contracts', 'A cap on contracts in one order, whatever the dollar size.'),
+      t('Maximum contracts per trade', 'A cap on contracts inside one trade, whatever the dollar size. It is not a count of trades; that is Maximum trades per day. At a few dollars a trade it rarely matters.'),
       t('Maximum share of equity per game', 'The most of your balance this bot can have at risk on one game across all its positions. 0.35 is 35%.')
     ]
   },
@@ -76,8 +76,8 @@ export const GLOSSARY: Section[] = [
     terms: [
       t('No entry in the final', 'No new live trades with this many seconds or fewer left in the game.'),
       t('Cancel unfilled after', 'An order that has not filled after this many seconds is cancelled.'),
-      t('Daily drawdown stop', 'The bot stops for the day once it is down this much, counting both settled losses and the drop in your balance since the day began.'),
-      t('Maximum trades per day', 'The bot stops opening trades after this many in a day.'),
+      t('Daily drawdown stop', 'The bot stops for the day once it is down this much, counting both settled losses and the drop in your balance since the day began at 4 AM your time.'),
+      t('Maximum trades per day', 'The bot stops opening trades after this many in a day. The day runs from 4 AM to 4 AM your time, so a late game counts with the night it started. It does not limit how much money is in play; on a live bot that is Maximum open exposure on the Account screen.'),
       t('No entries in overtime', 'No new trades once a game goes to overtime.'),
       t('One position per market', 'The bot holds at most one position in any one market.')
     ]

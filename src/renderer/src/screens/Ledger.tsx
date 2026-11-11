@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useState } from 'react'
 import { api, usd, type Ticket } from '../api'
+import { PlayActions } from './Report'
 
-export function Ledger() {
+export function Ledger({ onReport }: { onReport: (ticketId: string) => void }) {
   const [days, setDays] = useState(7)
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [open, setOpen] = useState<string | null>(null)
@@ -18,7 +19,7 @@ export function Ledger() {
   return (
     <>
       <h1>Ledger</h1>
-      <p className="lede">Every ticket, append only. Fills and settlements are read back from the venue's own record. Click a row for the full audit trail.</p>
+      <p className="lede">Every ticket, append only. Fills and settlements are read back from the venue's own record. Click a row for the full audit trail, to check the play against Kalshi and the bot's rules, or to report it.</p>
       <div className="row" style={{ marginBottom: 12 }}>
         <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ width: 160 }}>
           {[1, 7, 30, 90].map((d) => <option key={d} value={d}>Last {d} day{d > 1 ? 's' : ''}</option>)}
@@ -54,6 +55,7 @@ export function Ledger() {
                       <ul style={{ margin: '6px 0' }}>{t.audit.map((a, i) => <li key={i} className="muted">{a}</li>)}</ul>
                       {t.error && <div className="err">{t.error}</div>}
                       <div className="muted">fee {usd(t.feeUsd)}</div>
+                      <PlayActions ticketId={t.id} onReport={onReport} />
                     </td>
                   </tr>
                 )}

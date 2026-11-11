@@ -6,6 +6,9 @@ import { app } from 'electron'
 import { EventEmitter } from 'node:events'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { tradingDay } from '@shared/day'
+import { isLimitGate, type HeldBack, type LimitGate } from '@shared/limits'
+import { rulesOf } from '@shared/review'
 import type { AccountSettings, BotSettings, VenueId } from '@shared/schema'
 import { playTags, type BotVerdict, type Signal, type VenueQuote } from '@shared/signal'
 import { screen, type Candidate } from '../ai/agent'
@@ -58,7 +61,22 @@ export interface SupervisorState {
   verdicts: Record<string, BotVerdict[]>
 }
 
-const today = (t = Date.now()): string => new Date(t).toISOString().slice(0, 10)
+// What the money limits look like right now, for the Dashboard.
+export interface LimitsState {
+  // Open cost of live orders, the same sum the account exposure gate reads.
+  openLiveUsd: number
+  capUsd: number
+  liveBots: number
+  dryRun: boolean
+  // Plays a limit held back today, one per bot and gate, most first.
+  held: HeldBack[]
+}
+
+const today = tradingDay
+// What filled, at the price it filled. A live order counts at its full
+// ordered cost while it can still fill, and at this once it is done.
+const filledCost = (filled: number, avgFillC: number | null, limitPriceC: number): number => (filled * (avgFillC ?? limitPriceC)) / 100
+const openCost = (ts: Ticket[]): number => ts.filter((t) => OPEN.includes(t.status) && t.pnlUsd === null && t.status !== 'dry_run').reduce((s, t) => s + t.costUsd, 0)
 
 export class Supervisor extends EventEmitter {
   private timer: NodeJS.Timeout | null = null
@@ -77,6 +95,9 @@ export class Supervisor extends EventEmitter {
   private requoted = new Map<string, Signal>()
   private lastBookReadAt = 0
   private skipDay = today()
+  // botId|gate -> the signals a money or pace limit held back today.
+  private held = new Map<string, Set<string>>()
+  private heldDay = ''
   private verdicts: Record<string, BotVerdict[]> = {}
   readonly venues: Record<VenueId, Venue>
   state: SupervisorState = { running: false, lastCycleAt: null, lastError: null, signals: 0, refused: [], venues: {}, recent: [], board: [], verdicts: {} }
@@ -96,9 +117,47 @@ export class Supervisor extends EventEmitter {
   }
 
   // Everything but the board, which is large and only the Board screen needs.
-  publicState(): Omit<SupervisorState, 'board' | 'verdicts'> {
+  // The limits are worked out fresh, so a cap saved on Account shows at once.
+  publicState(): Omit<SupervisorState, 'board' | 'verdicts'> & { limits: LimitsState } {
     const { board: _b, verdicts: _v, ...rest } = this.state
-    return rest
+    return { ...rest, limits: this.limits() }
+  }
+
+  private limits(): LimitsState {
+    const account = settingsStore.account()
+    const bots = settingsStore.bots()
+    const names = new Map(bots.map((b) => [b.id, b.name]))
+    this.rollHeld()
+    const held = [...this.held].map(([k, signals]) => {
+      const [botId, gate] = k.split('|') as [string, LimitGate]
+      return { gate, botId, botName: names.get(botId) ?? 'A deleted bot', plays: signals.size }
+    }).sort((a, b) => b.plays - a.plays)
+    return {
+      openLiveUsd: openCost(ledger.tickets(2).filter((t) => t.venue !== 'paper')),
+      capUsd: account.accountMaxOpenExposureUsd,
+      liveBots: bots.filter((b) => b.enabled && b.mode === 'live').length,
+      dryRun: account.executionMode === 'dry_run',
+      held
+    }
+  }
+
+  // The day's held back plays, rebuilt from the ledger on a new day or a
+  // restart, so the count is the day's and not the session's.
+  private rollHeld(): void {
+    if (this.heldDay === today()) return
+    this.heldDay = today()
+    this.held.clear()
+    // Ledger files are cut at midnight UTC, so a trading day spans two.
+    for (const e of ledger.events(2)) {
+      if (e.type === 'skip' && today(e.at) === this.heldDay && isLimitGate(e.gate)) this.addHeld(e.botId, e.gate, e.signalKey)
+    }
+  }
+
+  private addHeld(botId: string, gate: string, signalKey: string): void {
+    const k = `${botId}|${gate}`
+    let s = this.held.get(k)
+    if (!s) this.held.set(k, (s = new Set()))
+    s.add(signalKey)
   }
 
   start(): void {
@@ -139,7 +198,7 @@ export class Supervisor extends EventEmitter {
       if ((t.status !== 'resting' && t.status !== 'partial') || !t.venueOrderId || t.venue === 'paper') continue
       try {
         await this.venues[t.venue].cancel(t.venueOrderId, t.contract)
-        this.update(t, { status: t.filledContracts > 0 ? 'partial' : 'cancelled', venueOrderId: null })
+        this.update(t, { status: t.filledContracts > 0 ? 'partial' : 'cancelled', venueOrderId: null, costUsd: filledCost(t.filledContracts, t.avgFillC, t.limitPriceC) })
       } catch (err) {
         this.log(t.botId, t.botName, t.title, 'cancel_failed', (err as Error).message)
       }
@@ -395,7 +454,6 @@ export class Supervisor extends EventEmitter {
   private context(bot: BotSettings, signal: Signal, mine: Ticket[], all: Ticket[], venues: Partial<Record<VenueId, VenueState>>, openKeys: Set<string>): GateContext {
     const day = today()
     const todays = (ts: Ticket[]): Ticket[] => ts.filter((t) => today(t.createdAt) === day)
-    const openCost = (ts: Ticket[]): number => ts.filter((t) => OPEN.includes(t.status) && t.pnlUsd === null && t.status !== 'dry_run').reduce((s, t) => s + t.costUsd, 0)
     const realised = (ts: Ticket[]): number => ts.reduce((s, t) => s + (t.pnlUsd ?? 0), 0)
 
     // Drawdown is the worse of realised losses and the equity drop since the
@@ -439,22 +497,24 @@ export class Supervisor extends EventEmitter {
       id: `${d.idempotencyKey}-${now.toString(36)}`,
       botId: bot.id, botName: bot.name, signalKey: signal.key, gameId: signal.gameId, title: signal.title,
       venue: d.venue, priceSource: d.priceSource, contract: d.contract, side: d.side,
-      // Paper fills only what the book offered, so its cost is what filled.
+      // Paper fills only what the book offered, so its cost is what filled. A
+      // live order that filled outright costs what it filled at.
       contracts: d.contracts, limitPriceC: d.limitPriceC, evCents: d.evCents,
-      costUsd: d.venue === 'paper' ? (res.filledContracts * (res.avgFillC ?? d.limitPriceC)) / 100 : d.costUsd,
+      costUsd: d.venue === 'paper' || res.status === 'filled' ? filledCost(res.filledContracts, res.avgFillC, d.limitPriceC) : d.costUsd,
       status: res.status, filledContracts: res.filledContracts, avgFillC: res.avgFillC, feeUsd: res.feeUsd,
       pnlUsd: null, venueOrderId: res.venueOrderId, createdAt: now, updatedAt: now,
       why: [signal.why, agentReason && `Agent: ${agentReason}`].filter(Boolean).join(' · ') || null,
       audit: [...d.audit, `ev ${d.evCents.toFixed(2)}c, breakeven ${(d.breakeven * 100).toFixed(1)}%, calibrated p ${(d.pCalibrated * 100).toFixed(1)}%`, ...(res.evidence ? [res.evidence] : [])],
       error: res.error,
-      play: playTags(signal)
+      play: playTags(signal),
+      rules: rulesOf(bot)
     }
     ledger.append({ type: 'ticket', ticket })
     // The kill switch pressed while the order was in flight: pull what rests.
     if (d.venue !== 'paper' && res.venueOrderId && (res.status === 'resting' || res.status === 'partial') && settingsStore.account().killSwitch) {
       try {
         await this.venues[d.venue].cancel(res.venueOrderId, ticket.contract)
-        this.update(ticket, { status: res.filledContracts > 0 ? 'partial' : 'cancelled', venueOrderId: null })
+        this.update(ticket, { status: res.filledContracts > 0 ? 'partial' : 'cancelled', venueOrderId: null, costUsd: filledCost(res.filledContracts, res.avgFillC, d.limitPriceC) })
       } catch (err) { this.log(bot.id, bot.name, signal.title, 'cancel_failed', (err as Error).message) }
     }
     const filled = res.filledContracts < d.contracts ? ` (${res.filledContracts} filled)` : ''
@@ -473,15 +533,19 @@ export class Supervisor extends EventEmitter {
         if ((t.status === 'resting' || t.status === 'partial') && t.venueOrderId) {
           const u = await venue.status(t.venueOrderId, { contract: t.contract, side: t.side })
           if (u) {
-            this.update(t, { status: u.status, filledContracts: u.filledContracts, avgFillC: u.avgFillC ?? t.avgFillC, feeUsd: u.feeUsd ?? t.feeUsd })
-            t.status = u.status; t.filledContracts = u.filledContracts
+            const avgFillC = u.avgFillC ?? t.avgFillC
+            const done = u.done || u.status === 'filled' || u.status === 'cancelled'
+            const patch: Partial<Ticket> = { status: u.status, filledContracts: u.filledContracts, avgFillC, feeUsd: u.feeUsd ?? t.feeUsd, ...(done ? { costUsd: filledCost(u.filledContracts, avgFillC, t.limitPriceC) } : {}) }
+            this.update(t, patch)
+            // A settlement later in this pass builds on this, fee and cost included.
+            Object.assign(t, patch)
           }
           // Expiry is set on the order itself; this is the backstop if the
           // venue did not honour it.
           const bot = settingsStore.bots().find((b) => b.id === t.botId)
           if (t.status === 'resting' && bot && Date.now() - t.createdAt > (bot.guards.autoCancelS + 30) * 1000) {
             await venue.cancel(t.venueOrderId, t.contract)
-            this.update(t, { status: t.filledContracts > 0 ? 'partial' : 'cancelled' })
+            this.update(t, { status: t.filledContracts > 0 ? 'partial' : 'cancelled', costUsd: filledCost(t.filledContracts, t.avgFillC, t.limitPriceC) })
             continue
           }
         }
@@ -530,6 +594,7 @@ export class Supervisor extends EventEmitter {
     if (this.skipSeen.has(key)) return
     this.skipSeen.add(key)
     ledger.append({ type: 'skip', at: Date.now(), botId: bot.id, signalKey: s.key, gate, detail })
+    if (isLimitGate(gate)) { this.rollHeld(); this.addHeld(bot.id, gate, s.key) }
     this.log(bot.id, bot.name, s.title, `skip:${gate}`, detail)
   }
 

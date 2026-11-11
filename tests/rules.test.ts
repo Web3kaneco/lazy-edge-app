@@ -208,3 +208,25 @@ describe('gates', () => {
     expect(d).toMatchObject({ kind: 'skip', gate: 'no_venue' })
   })
 })
+
+describe('settings audit, 2026-11-10', () => {
+  it('a negative edge never passes the minimum edge', () => {
+    const d = evaluate(signal({ ourP: 0.4, edgePp: -10 }), bot(), account(), ctx())
+    expect(d.kind === 'skip' && d.gate).toBe('min_edge')
+  })
+
+  it('the minimum edge holds on the venue that would be traded', () => {
+    const s = signal({ quotes: [
+      { venue: 'kalshi', contract: 'KXNFLTOTAL-G1-47', side: 'no', ask: 0.5, askSize: 500, priceAgeS: 20 },
+      { venue: 'polymarket', contract: 'pm-g1-47', side: 'no', ask: 0.58, askSize: 500, priceAgeS: 20 }
+    ] })
+    const d = evaluate(s, bot((b) => { b.market.venues = ['polymarket'] }), account(), ctx())
+    expect(d.kind === 'skip' && d.gate).toBe('no_venue')
+    expect(d.kind === 'skip' && d.detail).toMatch(/polymarket:edge 2.0pp/)
+  })
+
+  it('a live bot with only paper in its venues trades nowhere real', () => {
+    const d = evaluate(signal(), liveBot((b) => { b.market.venues = ['paper'] }), account((a) => { a.executionMode = 'live' }), ctx())
+    expect(d.kind === 'skip' && d.gate).toBe('no_venue')
+  })
+})

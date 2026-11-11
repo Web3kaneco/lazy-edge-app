@@ -3,6 +3,7 @@
 // closed, and every skip names the gate so the ledger can say why nothing
 // traded, which is how the 2026-07-23 silent slate would have been caught.
 import { createHash } from 'node:crypto'
+import { tradingDay } from '@shared/day'
 import { NEVER_TRADE_LABELS, type AccountSettings, type BotSettings, type VenueId } from '@shared/schema'
 import type { ContractSide, Signal, VenueQuote } from '@shared/signal'
 import { breakevenProb, evCents } from './fees'
@@ -120,7 +121,8 @@ export function evaluate(signal: Signal, bot: BotSettings, account: AccountSetti
   // 7. A null edge is no reading, never zero (agent guide, rule 1). Read
   // after the live requote, so it is the edge at the price that can be paid.
   if (signal.edgePp === null || signal.ourP === null) return skip('no_reading')
-  if (Math.abs(signal.edgePp) < bot.entry.minEdgePp) {
+  // Signed: a negative edge means the market already prices it above ours.
+  if (signal.edgePp < bot.entry.minEdgePp) {
     return skip('min_edge', `${signal.edgePp.toFixed(2)}pp < ${bot.entry.minEdgePp}pp`)
   }
 
@@ -163,7 +165,7 @@ export function evaluate(signal: Signal, bot: BotSettings, account: AccountSetti
     return skip('account_exposure', `$${(ctx.accountOpenExposureUsd + costUsd).toFixed(2)}`)
   }
 
-  const day = new Date(ctx.now).toISOString().slice(0, 10)
+  const day = tradingDay(ctx.now)
   return {
     kind: 'trade',
     venue,
@@ -192,6 +194,8 @@ function route(
   live: boolean
 ): Candidate | SkipDecision {
   const allowed = bot.market.venues.filter((v) => v !== 'paper')
+  // Only a paper bot may price off every venue; a live bot trades where it is told.
+  if (live && allowed.length === 0) return skip('no_venue', 'a live bot needs Kalshi or Polymarket in its venues')
   const reasons: string[] = []
   let best: Candidate | null = null
 
@@ -212,6 +216,10 @@ function route(
     const askC = q.ask * 100
     const [lo, hi] = bot.entry.priceBandC
     if (askC < lo || askC > hi) { reasons.push(`${q.venue}:band ${askC.toFixed(0)}c`); continue }
+    // The minimum edge holds on the venue that would be traded, not only on
+    // the best price anywhere.
+    const edgePp = (signal.ourP! - q.ask) * 100
+    if (edgePp < bot.entry.minEdgePp) { reasons.push(`${q.venue}:edge ${edgePp.toFixed(1)}pp`); continue }
 
     // The measured overconfidence haircut, then net EV after this venue's fee.
     const pCal = q.ask + (signal.ourP! - q.ask) * bot.entry.edgeHaircut
