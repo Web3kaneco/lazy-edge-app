@@ -27,7 +27,9 @@ export function limitsSummary(bot: BotSettings, account: AccountSettings): Limit
   lines.push(`At most ${guards.maxTradesPerDay} new trades a day. The day runs ${DAY_TEXT}, so a late West Coast game counts with the night it started.`)
   lines.push(`On its busiest day it could put up to ${money(busiest)} into trades (${guards.maxTradesPerDay} at ${money(size.maxTradeUsd)}). Trades that settle free their money, so far less is usually open at once.`)
   lines.push(`No more than ${Math.round(size.maxGameEquityPct * 100)}% of the account's value on any one game.`)
-  lines.push(`It stops for the day once it is down ${money(guards.maxDailyDrawdownUsd)}, and when your live bots together are down ${money(account.accountDailyDrawdownUsd)}.`)
+  const together = live ? `, or when your live bots together are down ${money(account.accountDailyDrawdownUsd)}` : ''
+  lines.push(`It stops opening trades for the day once its settled trades are down ${money(guards.maxDailyDrawdownUsd)} after fees${together}. Open trades count when they settle, and deposits and withdrawals never count.`)
+  lines.push(`It checks for new plays every ${Math.max(bot.pollS, 10)} seconds.`)
   if (live) lines.push(`Across every live bot together, at most ${money(cap)} is open at once. That is the Maximum open exposure on the Account screen, and it is what caps how much is in play.`)
   else lines.push('This bot trades practice money, so the open exposure limit on the Account screen does not apply to it.')
 

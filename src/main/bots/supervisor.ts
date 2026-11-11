@@ -2,10 +2,7 @@
 // book, run each enabled bot's gates, place, then reconcile fills and
 // settlements against the venue's own record. Runs only while the app is
 // open (decision 14).
-import { app } from 'electron'
 import { EventEmitter } from 'node:events'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { tradingDay } from '@shared/day'
 import { isLimitGate, type HeldBack, type LimitGate } from '@shared/limits'
 import { rulesOf } from '@shared/review'
@@ -37,7 +34,10 @@ const REQUOTE_SPACING_MS = 70
 // Gates that only restate a bot's own settings. The Board shows them live;
 // writing one ledger line per spread rung for them was 96% of the ledger.
 const SETTINGS_GATES = new Set(['sport_not_enabled', 'lane_not_enabled', 'phase_not_enabled', 'label_not_enabled', 'label_never_traded', 'not_measured', 'no_trigger'])
-const OPEN: Ticket['status'][] = ['resting', 'filled', 'partial', 'dry_run']
+// A bot is due a little early rather than a whole cycle late when the timer
+// and its Poll every line up.
+const POLL_SLACK_MS = 2000
+const OPEN: Ticket['status'][] =['resting', 'filled', 'partial', 'dry_run']
 
 export interface DecisionLogEntry {
   at: number
@@ -88,7 +88,6 @@ export class Supervisor extends EventEmitter {
   private nflMaps: Record<string, NflMarketMap> = {}
   private nbaLadders = new Map<string, { at: number; rungs: unknown }>()
   private skipSeen = new Set<string>()
-  private anchors: Record<string, number> = {}
   private guide = ''
   // One book read per signal per cycle, shared by every bot that looks at it.
   private requoting = new Map<string, Promise<Signal>>()
@@ -99,6 +98,8 @@ export class Supervisor extends EventEmitter {
   private held = new Map<string, Set<string>>()
   private heldDay = ''
   private verdicts: Record<string, BotVerdict[]> = {}
+  // Bot id (":preview" for a bot that is off) -> when its gates last ran.
+  private lastRun = new Map<string, number>()
   readonly venues: Record<VenueId, Venue>
   state: SupervisorState = { running: false, lastCycleAt: null, lastError: null, signals: 0, refused: [], venues: {}, recent: [], board: [], verdicts: {} }
 
@@ -113,7 +114,6 @@ export class Supervisor extends EventEmitter {
       kalshi: new KalshiVenue(() => settingsStore.account().venues.kalshi.environment),
       polymarket: new PolymarketVenue(() => settingsStore.account().venues.polymarket.accountType)
     }
-    this.loadAnchors()
   }
 
   // Everything but the board, which is large and only the Board screen needs.
@@ -163,7 +163,7 @@ export class Supervisor extends EventEmitter {
   start(): void {
     if (this.timer) return
     this.state.running = true
-    void this.cycle()
+    void this.cycle(true)
     this.timer = setInterval(() => void this.cycle(), this.cadenceMs())
     this.emitState()
   }
@@ -206,7 +206,8 @@ export class Supervisor extends EventEmitter {
     this.emitState()
   }
 
-  async cycle(): Promise<void> {
+  // `force` runs every bot whether or not it is due, for a cycle the user asked for.
+  async cycle(force = false): Promise<void> {
     if (this.busy) return
     this.busy = true
     try {
@@ -225,9 +226,26 @@ export class Supervisor extends EventEmitter {
 
       this.requoting.clear()
       this.requoted.clear()
+      const prev = this.state.verdicts
       this.verdicts = {}
-      for (const bot of bots) await this.runBot(bot, account, feed.signals, venueStates, false)
-      for (const bot of everyBot.filter((b) => !b.enabled)) await this.runBot(bot, account, feed.signals, venueStates, true)
+      // Poll every is per bot. The engine cycles at the fastest bot's pace and
+      // runs each bot once it is due; one not yet due keeps last time's
+      // verdicts on the Board.
+      const now = Date.now()
+      const run = async (bot: BotSettings, preview: boolean): Promise<void> => {
+        const key = preview ? `${bot.id}:preview` : bot.id
+        if (!force && now - (this.lastRun.get(key) ?? 0) < bot.pollS * 1000 - POLL_SLACK_MS) {
+          for (const [k, list] of Object.entries(prev)) {
+            const kept = list.filter((v) => v.botId === bot.id)
+            if (kept.length) (this.verdicts[k] ??= []).push(...kept)
+          }
+          return
+        }
+        this.lastRun.set(key, now)
+        await this.runBot(bot, account, feed.signals, venueStates, preview)
+      }
+      for (const bot of bots) await run(bot, false)
+      for (const bot of everyBot.filter((b) => !b.enabled)) await run(bot, true)
       // The board shows the live price wherever a bot read the book this cycle.
       // It is grouped by game on screen, so it carries the whole slate.
       this.state.board = feed.signals.slice(0, 3000).map((s) => this.requoted.get(s.key) ?? s)
@@ -344,9 +362,6 @@ export class Supervisor extends EventEmitter {
       const v = this.venues[id]
       out[id] = await v.state()
       this.state.venues[id] = { ...out[id]!, configured: v.configured() }
-      const eq = out[id]!.equityUsd
-      const key = `${today()}:${id}`
-      if (eq !== null && this.anchors[key] === undefined) { this.anchors[key] = eq; this.saveAnchors() }
     }
     return out
   }
@@ -456,26 +471,21 @@ export class Supervisor extends EventEmitter {
     const todays = (ts: Ticket[]): Ticket[] => ts.filter((t) => today(t.createdAt) === day)
     const realised = (ts: Ticket[]): number => ts.reduce((s, t) => s + (t.pnlUsd ?? 0), 0)
 
-    // Drawdown is the worse of realised losses and the equity drop since the
-    // day's first reading on the venues this bot trades, the way the Python
-    // guard anchors it.
-    const equityDrop = (ids: VenueId[]): number =>
-      ids.reduce((s, id) => {
-        const now = venues[id]?.equityUsd
-        const anchor = this.anchors[`${day}:${id}`]
-        return now === null || now === undefined || anchor === undefined ? s : s + (now - anchor)
-      }, 0)
-    const liveIds = (Object.keys(this.venues) as VenueId[]).filter((v) => v !== 'paper')
-    const botVenues = bot.mode === 'live' ? bot.market.venues.filter((v) => v !== 'paper') : []
-
+    // Drawdown is the settled result of the day's trades, after fees. It used
+    // to take the worse of that and the drop in account value since the day's
+    // first reading, the Python guard's anchor, but account value falls by
+    // the spread and fee the moment a position opens and moves with every
+    // deposit and withdrawal, so a busy night or a withdrawal stopped bots
+    // that had lost nothing. Every position is held to settlement, so the
+    // stop only ever decides new entries, and settled money is what it means.
     return {
       now: Date.now(),
       venues,
       openMarketKeys: openKeys,
       gameExposureUsd: openCost(mine.filter((t) => t.gameId === signal.gameId)),
       accountOpenExposureUsd: openCost(all.filter((t) => t.venue !== 'paper')),
-      botDailyPnlUsd: Math.min(realised(todays(mine)), botVenues.length ? equityDrop(botVenues) : 0),
-      accountDailyPnlUsd: Math.min(realised(todays(all.filter((t) => t.venue !== 'paper'))), equityDrop(liveIds)),
+      botDailyPnlUsd: realised(todays(mine)),
+      accountDailyPnlUsd: realised(todays(all.filter((t) => t.venue !== 'paper'))),
       // A paper order the book could not fill was never a trade.
       botTradesToday: todays(mine).filter((t) => t.status !== 'rejected' && !(t.status === 'cancelled' && t.filledContracts === 0)).length
     }
@@ -526,7 +536,9 @@ export class Supervisor extends EventEmitter {
   // ── Reconcile ────────────────────────────────────────────────────────
 
   private async reconcile(): Promise<void> {
-    for (const t of ledger.tickets(7)) {
+    // Every open trade, however old, so a week away still ends with each
+    // settlement recorded. The list is in memory; only open ones reach a venue.
+    for (const t of ledger.tickets(3650)) {
       if (t.pnlUsd !== null || !['resting', 'partial', 'filled'].includes(t.status)) continue
       const venue = this.venues[t.venue]
       try {
@@ -605,19 +617,6 @@ export class Supervisor extends EventEmitter {
 
   private emitState(): void {
     this.emit('state', this.state)
-  }
-
-  private anchorsFile = (): string => join(app.getPath('userData'), 'equity-anchors.json')
-
-  private loadAnchors(): void {
-    try { if (existsSync(this.anchorsFile())) this.anchors = JSON.parse(readFileSync(this.anchorsFile(), 'utf8')) } catch { this.anchors = {} }
-    // Keep a week; older anchors are never read.
-    const cutoff = today(Date.now() - 7 * 86_400_000)
-    for (const k of Object.keys(this.anchors)) if (k.slice(0, 10) < cutoff) delete this.anchors[k]
-  }
-
-  private saveAnchors(): void {
-    writeFileSync(this.anchorsFile(), JSON.stringify(this.anchors))
   }
 }
 

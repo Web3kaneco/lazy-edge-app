@@ -19,7 +19,7 @@ export const GLOSSARY: Section[] = [
       t('Kill switch', 'Stops every live order at once and cancels any order still waiting to fill. Paper bots keep running.'),
       t('Rules engine', 'The bot trades on the numbers alone. If a play passes every setting, it is placed.'),
       t('Agent', 'Your AI model sees only plays that already passed every setting and can decline any of them. It can never add a trade or change a setting.'),
-      t('Poll every', 'How often the bot checks for new plays, in seconds. The engine runs at the pace of the fastest bot that is switched on, never faster than every ten seconds.'),
+      t('Poll every', 'How often the bot checks for new plays, in seconds. Each bot keeps its own pace; none checks faster than every ten seconds.'),
       t('Hold to settlement', 'Every position is held until the market settles. There is no selling early in this version.')
     ]
   },
@@ -76,7 +76,7 @@ export const GLOSSARY: Section[] = [
     terms: [
       t('No entry in the final', 'No new live trades with this many seconds or fewer left in the game.'),
       t('Cancel unfilled after', 'An order that has not filled after this many seconds is cancelled.'),
-      t('Daily drawdown stop', 'The bot stops for the day once it is down this much, counting both settled losses and the drop in your balance since the day began at 4 AM your time.'),
+      t('Daily drawdown stop', 'The bot stops opening trades for the day once its settled trades are down this much after fees. The day runs from 4 AM to 4 AM your time. Open trades count once they settle, and deposits or withdrawals never count.'),
       t('Maximum trades per day', 'The bot stops opening trades after this many in a day. The day runs from 4 AM to 4 AM your time, so a late game counts with the night it started. It does not limit how much money is in play; on a live bot that is Maximum open exposure on the Account screen.'),
       t('No entries in overtime', 'No new trades once a game goes to overtime.'),
       t('One position per market', 'The bot holds at most one position in any one market.')

@@ -59,3 +59,14 @@ describe('limits summary', () => {
     expect(isLimitGate('min_edge')).toBe(false)
   })
 })
+
+describe('limits summary wording', () => {
+  it('says the stops count settled money only, and names the pace', () => {
+    const live = limitsSummary(explorer(), DEFAULT_ACCOUNT).lines.join(' ')
+    expect(live).toMatch(/settled trades are down \$50 after fees, or when your live bots together are down \$50/)
+    expect(live).toMatch(/deposits and withdrawals never count/)
+    const paper = limitsSummary(explorer((b) => { b.mode = 'paper'; b.pollS = 60 }), DEFAULT_ACCOUNT).lines.join(' ')
+    expect(paper).not.toMatch(/live bots together/)
+    expect(paper).toMatch(/every 60 seconds/)
+  })
+})

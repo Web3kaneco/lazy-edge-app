@@ -111,7 +111,7 @@ function registerIpc(): void {
   handle('board:get', () => ({ board: supervisor.state.board, verdicts: supervisor.state.verdicts }))
   handle('engine:start', () => { terms.require(); supervisor.start() })
   handle('engine:stop', () => supervisor.stop())
-  handle('engine:cycle', () => { terms.require(); return supervisor.cycle() })
+  handle('engine:cycle', () => { terms.require(); return supervisor.cycle(true) })
   handle('engine:killSwitch', (on: boolean) => {
     if (!on && settingsStore.account().killSwitch) confirmNative('Release the kill switch?', 'Live bots that are switched on will start sending orders again on the next cycle.', 'Release')
     return supervisor.killSwitch(Boolean(on))

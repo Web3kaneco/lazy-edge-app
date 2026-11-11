@@ -47,7 +47,7 @@ export function Account({ account, onSaved, onSignOut }: { account: AccountSetti
           </div>
         )}
         <div className="grid cols-2" style={{ marginTop: 12 }}>
-          <NumberField label="Account daily drawdown stop" suffix="$" step={5} value={a.accountDailyDrawdownUsd} measured={DEFAULT_ACCOUNT.accountDailyDrawdownUsd} why="Across every live bot together." onChange={(v) => set((x) => { x.accountDailyDrawdownUsd = v })} />
+          <NumberField label="Account daily drawdown stop" suffix="$" step={5} value={a.accountDailyDrawdownUsd} measured={DEFAULT_ACCOUNT.accountDailyDrawdownUsd} why="Settled losses after fees since 4 AM, across every live bot together. Paper bots are not affected." onChange={(v) => set((x) => { x.accountDailyDrawdownUsd = v })} />
           <NumberField label="Maximum open exposure" suffix="$" step={10} value={a.accountMaxOpenExposureUsd} measured={DEFAULT_ACCOUNT.accountMaxOpenExposureUsd} why="The most money your live bots together can have in open trades at once. This, not the trade count, is what caps how much is in play."onChange={(v) => set((x) => { x.accountMaxOpenExposureUsd = v })} />
         </div>
       </div>

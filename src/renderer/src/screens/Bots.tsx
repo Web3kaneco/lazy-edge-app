@@ -173,7 +173,7 @@ export function Bots() {
             <div className="grid cols-2">
               <NumberField label="No entry in the final" tip={tip('No entry in the final')} suffix="s" value={edit.guards.noEntryFinalS} measured={M.guards.noEntryFinalS} why="The overtime wipeout." onChange={(v) => set((b) => { b.guards.noEntryFinalS = v })} />
               <NumberField label="Cancel unfilled after" tip={tip('Cancel unfilled after')} suffix="s" value={edit.guards.autoCancelS} measured={M.guards.autoCancelS} min={5} onChange={(v) => set((b) => { b.guards.autoCancelS = v })} />
-              <NumberField label="Daily drawdown stop" tip={tip('Daily drawdown stop')} suffix="$" step={5} value={edit.guards.maxDailyDrawdownUsd} measured={M.guards.maxDailyDrawdownUsd} why="Worse of realised loss and the equity drop since the day's first reading." onChange={(v) => set((b) => { b.guards.maxDailyDrawdownUsd = v })} />
+              <NumberField label="Daily drawdown stop" tip={tip('Daily drawdown stop')} suffix="$" step={5} value={edit.guards.maxDailyDrawdownUsd} measured={M.guards.maxDailyDrawdownUsd} why="Settled losses after fees since 4 AM. Deposits, withdrawals and open trades do not count." onChange={(v) => set((b) => { b.guards.maxDailyDrawdownUsd = v })} />
               <NumberField label="Maximum trades per day" tip={tip('Maximum trades per day')} value={edit.guards.maxTradesPerDay} measured={M.guards.maxTradesPerDay} min={1} onChange={(v) => set((b) => { b.guards.maxTradesPerDay = v })} />
             </div>
             <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>

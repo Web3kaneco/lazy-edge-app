@@ -230,3 +230,12 @@ describe('settings audit, 2026-11-10', () => {
     expect(d.kind === 'skip' && d.gate).toBe('no_venue')
   })
 })
+
+describe('loss stops, 2026-11-10', () => {
+  it('the account stop pauses live bots and leaves paper bots alone', () => {
+    const down = ctx({ accountDailyPnlUsd: -60 })
+    const live = evaluate(signal(), liveBot(), account((a) => { a.executionMode = 'live' }), down)
+    expect(live.kind === 'skip' && live.gate).toBe('account_drawdown')
+    expect(evaluate(signal(), bot(), account(), down).kind).toBe('trade')
+  })
+})

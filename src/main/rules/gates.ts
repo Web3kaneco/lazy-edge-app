@@ -105,7 +105,8 @@ export function preGates(signal: Signal, bot: BotSettings, account: AccountSetti
   if (bot.guards.onePositionPerMarket && ctx.openMarketKeys.has(signal.key)) return skip('position_open', signal.key)
   if (ctx.botTradesToday >= bot.guards.maxTradesPerDay) return skip('max_trades_today')
   if (ctx.botDailyPnlUsd <= -bot.guards.maxDailyDrawdownUsd) return skip('bot_drawdown', ctx.botDailyPnlUsd.toFixed(2))
-  if (ctx.accountDailyPnlUsd <= -account.accountDailyDrawdownUsd) {
+  // The account stop counts live money only, so it stops live bots only.
+  if (live && ctx.accountDailyPnlUsd <= -account.accountDailyDrawdownUsd) {
     return skip('account_drawdown', ctx.accountDailyPnlUsd.toFixed(2))
   }
   return null
