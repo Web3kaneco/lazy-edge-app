@@ -13,3 +13,9 @@ export function tradingDay(t = Date.now()): string {
   if (d.getHours() < DAY_START_HOUR) d.setDate(d.getDate() - 1)
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
+
+// When a trading day starts and ends, in ms, on this computer's clock.
+export function dayBounds(day: string): { from: number; to: number } {
+  const [y, m, d] = day.split('-').map(Number) as [number, number, number]
+  return { from: new Date(y, m - 1, d, DAY_START_HOUR).getTime(), to: new Date(y, m - 1, d + 1, DAY_START_HOUR).getTime() }
+}

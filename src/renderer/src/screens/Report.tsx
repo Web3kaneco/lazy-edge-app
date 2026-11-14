@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { dayOptions, type DayReport } from '@shared/dayreport'
 import { buildReport, REPORT_KINDS, reportSubject, type ReportKind } from '@shared/report'
 import type { PlayReview } from '@shared/review'
 import type { AccountSettings, BotSettings } from '@shared/schema'
@@ -56,13 +57,13 @@ export function PlayActions({ ticketId, onReport }: { ticketId: string; onReport
 const playLabel = (t: Ticket): string =>
   `${new Date(t.createdAt).toLocaleDateString()} · ${t.botName} · ${t.title} · ${t.side.toUpperCase()} ${t.avgFillC ?? t.limitPriceC}c · ${t.pnlUsd === null ? t.status : usd(t.pnlUsd)}`
 
-export function Report({ ticketId }: { ticketId: string | null }) {
+export function Report({ ticketId, startKind }: { ticketId: string | null; startKind?: ReportKind }) {
   const engine = useEngine()
   const [ctx, setCtx] = useState<ReportContext | null>(null)
   const [account, setAccount] = useState<AccountSettings | null>(null)
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [bots, setBots] = useState<BotSettings[]>([])
-  const [kind, setKind] = useState<ReportKind>(ticketId ? 'play' : 'bug')
+  const [kind, setKind] = useState<ReportKind>(ticketId ? 'play' : startKind ?? 'bug')
   const [note, setNote] = useState('')
   const [playId, setPlayId] = useState(ticketId ?? '')
   const [botId, setBotId] = useState('')
@@ -70,6 +71,8 @@ export function Report({ ticketId }: { ticketId: string | null }) {
   const [review, setReview] = useState<PlayReview | null>(null)
   const [checking, setChecking] = useState(false)
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
+  const [dayPick, setDayPick] = useState('')
+  const [dayData, setDayData] = useState<Pick<DayReport, 'tickets' | 'skips'> | null>(null)
 
   useEffect(() => {
     void api.reportContext().then(setCtx)
@@ -79,6 +82,23 @@ export function Report({ ticketId }: { ticketId: string | null }) {
   }, [])
   // Report this play on another ledger row lands here with that play.
   useEffect(() => { if (ticketId) { setPlayId(ticketId); setKind('play') } }, [ticketId])
+  useEffect(() => { if (startKind && !ticketId) setKind(startKind) }, [startKind])
+
+  // Days with trades, the worst first among the losing ones so the day worth
+  // sending is the default.
+  const days = useMemo(() => dayOptions(tickets), [tickets])
+  useEffect(() => {
+    if (dayPick || !days.length) return
+    const losing = days.filter((d) => d.pnlUsd < 0).sort((a, b) => a.pnlUsd - b.pnlUsd)
+    setDayPick((losing[0] ?? days[0])!.day)
+  }, [days, dayPick])
+  useEffect(() => {
+    setDayData(null)
+    if (kind !== 'day' || !dayPick) return
+    let current = true
+    void api.reportDay(dayPick).then((d) => { if (current) setDayData(d) }).catch(() => {})
+    return () => { current = false }
+  }, [kind, dayPick])
 
   const play = tickets.find((t) => t.id === playId) ?? null
   // A play brings its own bot's settings along; the user can change it.
@@ -94,18 +114,31 @@ export function Report({ ticketId }: { ticketId: string | null }) {
 
   const bot = bots.find((b) => b.id === botId) ?? null
   const problems = ctx?.problems ?? []
-  const subject = reportSubject(kind, __APP_VERSION__, play?.title)
+  // Every bot that traded that day, with its settings as they are now.
+  const day: DayReport | undefined = kind === 'day' && dayData ? {
+    day: dayPick,
+    tickets: dayData.tickets,
+    skips: dayData.skips,
+    bots: [...new Map(dayData.tickets.map((t) => [t.botId, t.botName])).entries()].map(([id, name]) => {
+      const b = bots.find((x) => x.id === id)
+      if (!b) return { botId: id, botName: name, code: null, changes: 'This bot has since been deleted.' }
+      const ch = changesFromDefaults(b)
+      return { botId: id, botName: b.name, code: shareCode(b), changes: ch.length ? `Settings now, changed from the measured defaults: ${ch.map((c) => `${c.field} ${JSON.stringify(c.from)} to ${JSON.stringify(c.to)}`).join('; ')}` : 'Settings now: the measured defaults.' }
+    })
+  } : undefined
+  const subject = reportSubject(kind, __APP_VERSION__, kind === 'day' ? dayPick : play?.title)
   const text = useMemo(() => !ctx ? '' : buildReport({
     kind, note, at: Date.now(),
     app: {
       version: __APP_VERSION__, os: ctx.os, engineRunning: Boolean(engine?.running),
       executionMode: account?.executionMode ?? 'dry_run', killSwitch: Boolean(account?.killSwitch), lastError: engine?.lastError ?? null
     },
-    play: play ?? undefined,
-    review: play ? review : null,
-    bot: bot ? { name: bot.name, code: shareCode(bot), changes: changesFromDefaults(bot) } : undefined,
+    play: kind !== 'day' && play ? play : undefined,
+    review: kind !== 'day' && play ? review : null,
+    day,
+    bot: kind !== 'day' && bot ? { name: bot.name, code: shareCode(bot), changes: changesFromDefaults(bot) } : undefined,
     problems: withProblems ? problems : []
-  }), [ctx, kind, note, engine?.running, engine?.lastError, account, play, review, bot, withProblems, problems])
+  }), [ctx, kind, note, engine?.running, engine?.lastError, account, play, review, bot, withProblems, problems, day])
 
   const to = ctx?.supportEmail ?? ''
   const email = async (): Promise<void> => {
@@ -144,6 +177,24 @@ export function Report({ ticketId }: { ticketId: string | null }) {
         </Field>
       </div>
 
+      {kind === 'day' ? (
+      <div className="card" style={{ marginBottom: 12 }}>
+        <h2>Which day</h2>
+        <Field label="Trading day" hint="Days run from 4 AM to 4 AM your time. Losing days are marked; the worst one is picked for you.">
+          <select value={dayPick} onChange={(e) => setDayPick(e.target.value)}>
+            {!days.length && <option value="">No trades in the last 30 days</option>}
+            {days.map((d) => (
+              <option key={d.day} value={d.day}>
+                {d.day} · {d.trades} trades · {d.settled ? usd(d.pnlUsd) : 'nothing settled'}{d.pnlUsd < 0 ? ' · losing day' : ''}{d.live ? ' · live money' : ' · paper'}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <p className="small muted" style={{ marginTop: 8 }}>
+          The report holds every trade that day, what each bot made or lost by sport, lane and label, how many plays it passed on and why, and each bot's settings as a share code, so the team can replay the day and suggest changes. It never holds keys, passwords or balances.
+        </p>
+      </div>
+      ) : (
       <div className="card" style={{ marginBottom: 12 }}>
         <h2>Attach</h2>
         <div className="grid cols-2">
@@ -166,6 +217,7 @@ export function Report({ ticketId }: { ticketId: string | null }) {
         </label>
         {play && (checking ? <p className="muted small">Checking the play…</p> : review && <PlayReviewCard review={review} />)}
       </div>
+      )}
 
       <div className="card">
         <h2>Send</h2>

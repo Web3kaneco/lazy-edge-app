@@ -85,6 +85,18 @@ export const STARTERS: Starter[] = [
     })
   },
   {
+    key: 'pregame',
+    name: 'Pregame only',
+    summary: 'NBA and NFL moneylines, spreads and totals before the game starts, and nothing once it is under way. Checked once a minute.',
+    // No MLB: its feed carries a date but no first pitch time or status, so
+    // nothing can prove an MLB row is still pregame.
+    build: make('pregame', 'Pregame only', (b) => {
+      b.market.sports = ['NBA', 'NFL']
+      b.market.phase = 'pregame'
+      b.pollS = 60
+    })
+  },
+  {
     key: 'explorer',
     name: 'Explorer, tiny size',
     summary: 'Takes every tradeable label at a lower edge bar and $2 a trade at most, so Results can show which labels and lanes are worth keeping.',

@@ -8,6 +8,7 @@ import { NEVER_TRADE_LABELS, type AccountSettings, type BotSettings, type VenueI
 import type { ContractSide, Signal, VenueQuote } from '@shared/signal'
 import { breakevenProb, evCents } from './fees'
 import { resolveSide } from './side'
+import { opposedBy, type Position } from './stance'
 
 export interface VenueState {
   // Usable balance in dollars, null when the venue could not be read.
@@ -19,7 +20,10 @@ export interface VenueState {
 export interface GateContext {
   now: number
   venues: Partial<Record<VenueId, VenueState>>
+  // Signal keys and contract tickers this bot holds open, of any age.
   openMarketKeys: ReadonlySet<string>
+  // This bot's open positions on this game.
+  gamePositions: readonly Position[]
   // Open cost already committed on this game by this bot, in dollars.
   gameExposureUsd: number
   accountOpenExposureUsd: number
@@ -102,7 +106,18 @@ export function preGates(signal: Signal, bot: BotSettings, account: AccountSetti
   }
 
   // 6. Position and pace limits.
-  if (bot.guards.onePositionPerMarket && ctx.openMarketKeys.has(signal.key)) return skip('position_open', signal.key)
+  // A market is the contract, on either side, whichever row priced it: a
+  // board row and a hot play on one ticker are one position.
+  if (bot.guards.onePositionPerMarket) {
+    const held = ctx.openMarketKeys.has(signal.key) ? signal.key : signal.quotes.find((q) => ctx.openMarketKeys.has(q.contract))?.contract
+    if (held) return skip('position_open', held)
+  }
+  if (bot.guards.noOpposingBets) {
+    for (const q of signal.quotes) {
+      const against = opposedBy({ contract: q.contract, side: q.side }, ctx.gamePositions)
+      if (against) return skip('opposes_position', `holds ${against.side.toUpperCase()} ${against.contract}`)
+    }
+  }
   if (ctx.botTradesToday >= bot.guards.maxTradesPerDay) return skip('max_trades_today')
   if (ctx.botDailyPnlUsd <= -bot.guards.maxDailyDrawdownUsd) return skip('bot_drawdown', ctx.botDailyPnlUsd.toFixed(2))
   // The account stop counts live money only, so it stops live bots only.

@@ -12,9 +12,10 @@ import { screen, type Candidate } from '../ai/agent'
 import { accuracy } from './accuracy'
 import { ai } from '../ai/registry'
 import { lazyedge, NotSignedInError, PlanInactiveError } from '../data/lazyedge'
-import { matchupOf, mlbEdges, nbaLiveEdges, nbaRowProblem, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, type NflMarketMap, type Normalized } from '../data/normalize'
+import { matchupOf, mlbEdges, nflBoardPhase, nbaLiveEdges, nbaRowProblem, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, type NflMarketMap, type Normalized } from '../data/normalize'
 import { evaluate, preGates, type GateContext, type TradeDecision, type VenueState } from '../rules/gates'
-import { ledger, type Ticket } from '../store/ledger'
+import type { Position } from '../rules/stance'
+import { isOpen, ledger, type Ticket } from '../store/ledger'
 import { settingsStore } from '../store/settings'
 import { terms } from '../store/terms'
 import { KalshiVenue } from '../venues/kalshi'
@@ -37,7 +38,6 @@ const SETTINGS_GATES = new Set(['sport_not_enabled', 'lane_not_enabled', 'phase_
 // A bot is due a little early rather than a whole cycle late when the timer
 // and its Poll every line up.
 const POLL_SLACK_MS = 2000
-const OPEN: Ticket['status'][] =['resting', 'filled', 'partial', 'dry_run']
 
 export interface DecisionLogEntry {
   at: number
@@ -76,7 +76,7 @@ const today = tradingDay
 // What filled, at the price it filled. A live order counts at its full
 // ordered cost while it can still fill, and at this once it is done.
 const filledCost = (filled: number, avgFillC: number | null, limitPriceC: number): number => (filled * (avgFillC ?? limitPriceC)) / 100
-const openCost = (ts: Ticket[]): number => ts.filter((t) => OPEN.includes(t.status) && t.pnlUsd === null && t.status !== 'dry_run').reduce((s, t) => s + t.costUsd, 0)
+const openCost = (ts: Ticket[]): number => ts.filter((t) => isOpen(t) && t.status !== 'dry_run').reduce((s, t) => s + t.costUsd, 0)
 
 export class Supervisor extends EventEmitter {
   private timer: NodeJS.Timeout | null = null
@@ -84,7 +84,8 @@ export class Supervisor extends EventEmitter {
   private lastBoardAt = 0
   private lastReconcileAt = 0
   private boardCache: Normalized = { signals: [], refused: [] }
-  // game_id -> the Kalshi tickers /v1/nfl/edges publishes from nfl_market_map.
+  // game_id -> the game as /v1/nfl/edges publishes it: the Kalshi tickers
+  // from nfl_market_map, its kickoff and its status.
   private nflMaps: Record<string, NflMarketMap> = {}
   private nbaLadders = new Map<string, { at: number; rungs: unknown }>()
   private skipSeen = new Set<string>()
@@ -133,7 +134,7 @@ export class Supervisor extends EventEmitter {
       return { gate, botId, botName: names.get(botId) ?? 'A deleted bot', plays: signals.size }
     }).sort((a, b) => b.plays - a.plays)
     return {
-      openLiveUsd: openCost(ledger.tickets(2).filter((t) => t.venue !== 'paper')),
+      openLiveUsd: openCost(ledger.active(2).filter((t) => t.venue !== 'paper')),
       capUsd: account.accountMaxOpenExposureUsd,
       liveBots: bots.filter((b) => b.enabled && b.mode === 'live').length,
       dryRun: account.executionMode === 'dry_run',
@@ -194,7 +195,7 @@ export class Supervisor extends EventEmitter {
     const account = settingsStore.account()
     settingsStore.saveAccount({ ...account, killSwitch: on })
     if (!on) return this.emitState()
-    for (const t of ledger.tickets(2)) {
+    for (const t of ledger.active(2)) {
       if ((t.status !== 'resting' && t.status !== 'partial') || !t.venueOrderId || t.venue === 'paper') continue
       try {
         await this.venues[t.venue].cancel(t.venueOrderId, t.contract)
@@ -303,7 +304,9 @@ export class Supervisor extends EventEmitter {
         this.boardCache = board
         this.lastBoardAt = now
       }
-      add(this.boardCache)
+      // The board is cached for five minutes, so whether its game has kicked
+      // off is worked out again every cycle.
+      add({ refused: this.boardCache.refused, signals: this.boardCache.signals.map((s) => ({ ...s, ...nflBoardPhase(this.nflMaps[s.gameId], now) })) })
       add(nflHotPlays(await lazyedge.nflLivePlays(), now, this.nflMaps))
     }
     if (sports.has('MLB')) add(mlbEdges(await lazyedge.mlbEdges(), now))
@@ -375,9 +378,11 @@ export class Supervisor extends EventEmitter {
   // that need no price, then every surviving book read at once, then the full
   // gates at the live price, best edge first.
   private async runBot(bot: BotSettings, account: AccountSettings, signals: Signal[], venues: Partial<Record<VenueId, VenueState>>, preview: boolean): Promise<void> {
-    const tickets = ledger.tickets(2)
+    // Open tickets of any age, or a position held past two days is forgotten:
+    // bought again, and missing from the exposure caps.
+    const tickets = ledger.active(2)
     const mine = tickets.filter((t) => t.botId === bot.id)
-    const openKeys = new Set(mine.filter((t) => OPEN.includes(t.status) && t.pnlUsd === null).map((t) => t.signalKey))
+    const openKeys = new Set(mine.filter(isOpen).flatMap((t) => [t.signalKey, t.contract]))
     const asIf = preview ? { ...bot, enabled: true } : bot
     const verdict = (s: Signal, outcome: BotVerdict['outcome'], gate: string | null, detail: string): void => {
       ;(this.verdicts[s.key] ??= []).push({ botId: bot.id, botName: bot.name, enabled: !preview, outcome, gate, detail })
@@ -392,7 +397,7 @@ export class Supervisor extends EventEmitter {
       if (!bot.market.sports.includes(raw.sport) || !bot.market.lanes.includes(raw.lane)) continue
       if (bot.market.phase !== 'both' && bot.market.phase !== raw.phase) continue
       if (!raw.quotes.length) { skip(raw, 'no_venue', 'no contract on this signal'); continue }
-      if (openKeys.has(raw.key) && bot.guards.onePositionPerMarket) { verdict(raw, 'holding', null, 'already holds this market'); continue }
+      if (bot.guards.onePositionPerMarket && (openKeys.has(raw.key) || raw.quotes.some((q) => openKeys.has(q.contract)))) { verdict(raw, 'holding', null, 'already holds this market'); continue }
       const pre = preGates(raw, asIf, account, this.context(bot, raw, mine, tickets, venues, openKeys))
       if (pre) { skip(raw, pre.gate, pre.detail); continue }
       survivors.push(raw)
@@ -405,12 +410,14 @@ export class Supervisor extends EventEmitter {
     let pendingTrades = 0
     let pendingLiveUsd = 0
     const pendingGameUsd = new Map<string, number>()
+    const pendingPositions: (Position & { gameId: string })[] = []
     const candidates: Candidate[] = []
     for (const signal of fresh) {
       const ctx = this.context(bot, signal, mine, tickets, venues, openKeys)
       ctx.botTradesToday += pendingTrades
       ctx.gameExposureUsd += pendingGameUsd.get(signal.gameId) ?? 0
       ctx.accountOpenExposureUsd += pendingLiveUsd
+      ctx.gamePositions = [...ctx.gamePositions, ...pendingPositions.filter((p) => p.gameId === signal.gameId)]
       const decision = evaluate(signal, asIf, account, ctx)
       if (decision.kind === 'skip') { skip(signal, decision.gate, decision.detail); continue }
       const what = `${decision.side.toUpperCase()} ${decision.contracts} @ ${decision.limitPriceC}c on ${decision.venue}, ev ${decision.evCents.toFixed(1)}c`
@@ -419,7 +426,10 @@ export class Supervisor extends EventEmitter {
       pendingTrades++
       pendingGameUsd.set(signal.gameId, (pendingGameUsd.get(signal.gameId) ?? 0) + decision.costUsd)
       if (decision.venue !== 'paper' && !decision.dryRun) pendingLiveUsd += decision.costUsd
-      openKeys.add(signal.key) // one per market even within a cycle
+      // One per market, and no bet against it, even within a cycle.
+      openKeys.add(signal.key)
+      openKeys.add(decision.contract)
+      pendingPositions.push({ contract: decision.contract, side: decision.side, gameId: signal.gameId })
       // A rules bot places the moment a play passes, while the price is fresh.
       if (bot.decider.kind === 'rules') await this.place(bot, signal, decision, null)
       else candidates.push({ id: signal.key, signal, decision })
@@ -482,6 +492,7 @@ export class Supervisor extends EventEmitter {
       now: Date.now(),
       venues,
       openMarketKeys: openKeys,
+      gamePositions: mine.filter((t) => isOpen(t) && t.gameId === signal.gameId).map((t) => ({ contract: t.contract, side: t.side })),
       gameExposureUsd: openCost(mine.filter((t) => t.gameId === signal.gameId)),
       accountOpenExposureUsd: openCost(all.filter((t) => t.venue !== 'paper')),
       botDailyPnlUsd: realised(todays(mine)),
@@ -587,7 +598,7 @@ export class Supervisor extends EventEmitter {
   private paperState(): VenueState {
     const start = settingsStore.account().venues.paper.startingBalanceUsd
     const paper = ledger.tickets(3650).filter((t) => t.venue === 'paper')
-    const open = paper.filter((t) => t.pnlUsd === null && OPEN.includes(t.status)).reduce((s, t) => s + t.costUsd + t.feeUsd, 0)
+    const open = paper.filter(isOpen).reduce((s, t) => s + t.costUsd + t.feeUsd, 0)
     const settled = paper.reduce((s, t) => s + (t.pnlUsd ?? 0), 0)
     const balance = start + settled - open
     return { balanceUsd: balance, equityUsd: balance + open }

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import type { AccuracyEntry } from '@shared/accuracy'
 import type { HeldBack } from '@shared/limits'
+import type { NoticesState } from '@shared/notices'
 import type { PlayReview } from '@shared/review'
 import type { AccountSettings, BotSettings, ProviderId } from '@shared/schema'
 import type { BotVerdict, PlayTags, Signal } from '@shared/signal'
@@ -74,7 +75,21 @@ export const api = {
   checkPlay: (id: string) => c<PlayReview>('play:check', id),
   reportContext: () => c<ReportContext>('report:context'),
   emailReport: (subject: string, text: string) => c<{ full: boolean }>('report:email', subject, text),
-  saveReport: (text: string) => c<string | null>('report:save', text)
+  saveReport: (text: string) => c<string | null>('report:save', text),
+  notices: () => c<NoticesState>('notices:get'),
+  dismissNotice: (id: string) => c<void>('notices:dismiss', id),
+  checkNotices: () => c<NoticesState>('notices:check'),
+  reportDay: (day: string) => c<{ tickets: Ticket[]; skips: Record<string, Record<string, number>> }>('report:day', day)
+}
+
+// Team notices and update alerts, pushed whenever they change.
+export function useNotices(): NoticesState | null {
+  const [s, setS] = useState<NoticesState | null>(null)
+  useEffect(() => {
+    void api.notices().then(setS).catch(() => {})
+    return window.lazyedge.on('notices', (next) => setS(next))
+  }, [])
+  return s
 }
 
 export interface ReportContext {

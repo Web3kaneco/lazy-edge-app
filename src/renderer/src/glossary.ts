@@ -33,7 +33,7 @@ export const GLOSSARY: Section[] = [
       t('TOTAL', 'Whether both teams together score over or under a number of points.'),
       t('TEAM_TOTAL', 'Whether one team scores over or under a number. Not yet graded by Lazy Edge, so it is off by default.'),
       t('PROP', 'A player stat such as passing yards. Live prop plays are not yet graded by Lazy Edge.'),
-      t('Phase', 'Pregame trades before kickoff or tip. Live trades during the game, which includes NFL hot plays and NBA live edges. Both does both.'),
+      t('Phase', 'Pregame trades only before kickoff or tip: once a game starts, or its start cannot be read, its plays count as live. Live trades during the game, which includes NFL hot plays and NBA live edges. Both does both.'),
       t('Hot play', 'A live NFL edge that met Lazy Edge\'s hot plays rule during a game. Bots set to Live or Both phase can trade them.'),
       t('Labels', 'Every board row is labelled by how its edge was found. A bot only trades labels you switch on.'),
       t('PRICE_GAP', 'Our probability clears the venue\'s ask by 3 or more points on a tight quote.'),
@@ -79,7 +79,8 @@ export const GLOSSARY: Section[] = [
       t('Daily drawdown stop', 'The bot stops opening trades for the day once its settled trades are down this much after fees. The day runs from 4 AM to 4 AM your time. Open trades count once they settle, and deposits or withdrawals never count.'),
       t('Maximum trades per day', 'The bot stops opening trades after this many in a day. The day runs from 4 AM to 4 AM your time, so a late game counts with the night it started. It does not limit how much money is in play; on a live bot that is Maximum open exposure on the Account screen.'),
       t('No entries in overtime', 'No new trades once a game goes to overtime.'),
-      t('One position per market', 'The bot holds at most one position in any one market.')
+      t('One position per market', 'The bot holds at most one position in any one contract, on either side, however old the position is.'),
+      t('Never bet against itself', 'The bot never takes a trade that bets against one it already holds on the same game: the other team to win, the other side of the same line, or a line that contradicts it. Bets that agree, such as a team to win and to cover, are still allowed.')
     ]
   }
 ]
@@ -101,6 +102,7 @@ export const GATES: Record<string, string> = {
   overtime: 'Overtime',
   final_seconds: 'Too close to the end',
   position_open: 'Already holds this market',
+  opposes_position: 'Would bet against a position it holds',
   max_trades_today: 'Daily trade limit reached',
   bot_drawdown: 'Bot hit its daily drawdown stop',
   account_drawdown: 'Account hit its daily drawdown stop',

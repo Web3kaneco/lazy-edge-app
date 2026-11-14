@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildReport, MAILTO_MAX, mailtoUrl, REPORT_MAX, reportSubject, type ReportInput } from '../src/shared/report'
+import { dayOptions, type DayTicket } from '../src/shared/dayreport'
 import { defaultBot } from '../src/shared/ruleset'
 import { changesFromDefaults, shareCode } from '../src/shared/share'
 
@@ -63,5 +64,33 @@ describe('report', () => {
 
   it('names the play in the subject', () => {
     expect(reportSubject('play', '0.2.0-beta.3', 'SEA -3.5')).toBe('Lazy Edge 0.2.0-beta.3 Play report: SEA -3.5')
+  })
+})
+
+describe('a day of trades for the team', () => {
+  const t = (over: Partial<DayTicket>): DayTicket => ({
+    botId: 'b1', botName: 'Bot 1', signalKey: 'nba:g1:SPREAD:KXNBASPREAD-99JAN01AAABBB-AAA5:yes', gameId: 'g1', side: 'yes', venue: 'paper',
+    filledContracts: 10, avgFillC: 40, limitPriceC: 40, costUsd: 4, feeUsd: 0.17, pnlUsd: -4.17, createdAt: new Date(2099, 0, 1, 20).getTime(),
+    title: 'AAA by over 4.5', contract: 'KXNBASPREAD-99JAN01AAABBB-AAA5', status: 'settled', evCents: 2, ...over
+  })
+
+  it('lists days with trades, newest first, and leaves out orders that never filled', () => {
+    const days = dayOptions([t({}), t({ createdAt: new Date(2099, 0, 2, 2).getTime(), pnlUsd: 5 }), t({ createdAt: new Date(2099, 0, 3, 20).getTime(), status: 'cancelled', filledContracts: 0 })])
+    expect(days).toHaveLength(1)
+    expect(days[0]).toMatchObject({ day: '2099-01-01', trades: 2, settled: 2, live: false })
+    expect(days[0]!.pnlUsd).toBeCloseTo(0.83)
+  })
+
+  it('puts the totals first and every trade as a CSV row', () => {
+    const text = buildReport({ kind: 'day', note: '', at: 0, app, day: {
+      day: '2099-01-01', tickets: [t({}), t({ pnlUsd: null, status: 'filled', title: 'AAA, "late"' })],
+      skips: { b1: { min_edge: 30, max_trades_today: 4 } },
+      bots: [{ botId: 'b1', botName: 'Bot 1', code: 'LEBOT1:abc', changes: 'Settings now: the measured defaults.' }]
+    } })
+    expect(text).toMatch(/2 trades, 1 settled \(0 won, 1 lost\), 1 still open/)
+    expect(text).toMatch(/Passed on: min_edge 30, max_trades_today 4/)
+    expect(text).toMatch(/NBA SPREAD \S+ \S+: 2 trades, -\$4.17 settled, 1 open/)
+    expect(text).toMatch(/Share code: LEBOT1:abc/)
+    expect(text).toMatch(/"AAA, ""late""",KXNBASPREAD-99JAN01AAABBB-AAA5,yes,10,40,4.00,0.17,2.0,filled,open/)
   })
 })

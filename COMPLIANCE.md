@@ -20,6 +20,7 @@ Exchange data and exchange keys stay between the user's computer and the exchang
 | Lazy Edge to the user's computer | Lazy Edge numbers and edges |
 | Kalshi to and from the user's computer | Prices, balance, positions and orders |
 | The user's computer to Lazy Edge | Only the Lazy Edge API key on each call. No Kalshi key, no positions, no fills, no prices |
+| GitHub to the user's computer | Release files and the team's notices file. The app sends only the request for the file |
 
 This is what makes each user's use of Kalshi their own trading, which is the use Kalshi's Developer Agreement allows. Any AI provider a user connects is the user's own account, used with the user's own key for the user's own trading.
 

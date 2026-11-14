@@ -62,6 +62,7 @@ function ctx(over: Partial<GateContext> = {}): GateContext {
       polymarket: { balanceUsd: 200, equityUsd: 200 }
     },
     openMarketKeys: new Set(),
+    gamePositions: [],
     gameExposureUsd: 0,
     accountOpenExposureUsd: 0,
     botDailyPnlUsd: 0,
@@ -237,5 +238,57 @@ describe('loss stops, 2026-11-10', () => {
     const live = evaluate(signal(), liveBot(), account((a) => { a.executionMode = 'live' }), down)
     expect(live.kind === 'skip' && live.gate).toBe('account_drawdown')
     expect(evaluate(signal(), bot(), account(), down).kind).toBe('trade')
+  })
+})
+
+// From the 2026-11-14 audit of a tester's ledger: YES on both moneylines of
+// one game, both sides of one spread rung, and both teams "not by over 1.5".
+describe('never bets against itself, 2026-11-14', () => {
+  const held = (contract: string, side: 'yes' | 'no') => ctx({ gamePositions: [{ contract, side }] })
+  const on = (contract: string, side: 'yes' | 'no') => signal({ signalType: side === 'yes' ? 'BUY_OVER' : 'BUY_UNDER', explicitSide: side, quotes: [{ venue: 'kalshi', contract, side, ask: 0.5, askSize: 500, priceAgeS: 20 }] })
+
+  it('refuses the other moneyline, the other side of a rung, and a contradicting rung', () => {
+    const cases: [string, 'yes' | 'no', string, 'yes' | 'no'][] = [
+      ['KXNBAGAME-99JAN01UTADAL-DAL', 'yes', 'KXNBAGAME-99JAN01UTADAL-UTA', 'yes'],
+      ['KXNBASPREAD-99JAN01DENIND-DEN11', 'no', 'KXNBASPREAD-99JAN01DENIND-DEN11', 'yes'],
+      ['KXNBASPREAD-99JAN01BKNATL-ATL2', 'no', 'KXNBASPREAD-99JAN01BKNATL-BKN2', 'no'],
+      ['KXNBASPREAD-99JAN01DENIND-DEN10', 'yes', 'KXNBASPREAD-99JAN01DENIND-DEN15', 'no'],
+      ['KXNFLTOTAL-99JAN01LARWAS-49', 'yes', 'KXNFLTOTAL-99JAN01LARWAS-46', 'no'],
+      ['KXNFLTEAMTOTAL-99JAN01DALIND-IND24', 'yes', 'KXNFLTEAMTOTAL-99JAN01DALIND-IND21', 'no']
+    ]
+    for (const [hc, hs, c, s] of cases) {
+      const d = evaluate(on(c, s), bot(), account(), held(hc, hs))
+      expect(d.kind === 'skip' && d.gate, `${hs} ${hc} then ${s} ${c}`).toBe('opposes_position')
+    }
+  })
+
+  it('lets through bets that agree, and other teams totals', () => {
+    const cases: [string, 'yes' | 'no', string, 'yes' | 'no'][] = [
+      ['KXNFLGAME-99JAN01DALIND-IND', 'yes', 'KXNFLSPREAD-99JAN01DALIND-DAL6', 'no'],
+      ['KXNBASPREAD-99JAN01WASOKC-OKC17', 'yes', 'KXNBASPREAD-99JAN01WASOKC-OKC22', 'yes'],
+      ['KXNFLTOTAL-99JAN01LARWAS-49', 'yes', 'KXNFLTOTAL-99JAN01LARWAS-48', 'yes'],
+      ['KXNFLTEAMTOTAL-99JAN01DALIND-IND24', 'yes', 'KXNFLTEAMTOTAL-99JAN01DALIND-DAL29', 'no'],
+      ['KXNFLTOTAL-99JAN01LARWAS-49', 'yes', 'KXNFLSPREAD-99JAN01LARWAS-LAR5', 'no']
+    ]
+    for (const [hc, hs, c, s] of cases) {
+      expect(evaluate(on(c, s), bot(), account(), held(hc, hs)).kind, `${hs} ${hc} then ${s} ${c}`).toBe('trade')
+    }
+  })
+
+  it('can be switched off', () => {
+    const d = evaluate(on('KXNBAGAME-99JAN01UTADAL-UTA', 'yes'), bot((b) => { b.guards.noOpposingBets = false }), account(), held('KXNBAGAME-99JAN01UTADAL-DAL', 'yes'))
+    expect(d.kind).toBe('trade')
+  })
+
+  it('one position per market means the contract, whichever row priced it', () => {
+    const d = evaluate(signal({ key: 'nfl:g1:live:TOTAL:47.5:::UNDER' }), bot(), account(), ctx({ openMarketKeys: new Set(['KXNFLTOTAL-G1-47']) }))
+    expect(d.kind === 'skip' && d.gate).toBe('position_open')
+  })
+
+  it('a bot saved before the setting existed reads it as on', async () => {
+    const { BotSettings } = await import('@shared/schema')
+    const old = structuredClone(defaultBot('old', 'old')) as any
+    delete old.guards.noOpposingBets
+    expect(BotSettings.parse(old).guards.noOpposingBets).toBe(true)
   })
 })

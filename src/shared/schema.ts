@@ -103,6 +103,9 @@ export const BotSettings = z.object({
     noEntryFinalS: z.number().int().min(0).max(900),
     noOvertime: z.boolean(),
     onePositionPerMarket: z.boolean(),
+    // Refuses a trade that bets against a position this bot already holds on
+    // the same game. Bots saved before 0.4.0 read it as on.
+    noOpposingBets: z.boolean().default(true),
     autoCancelS: z.number().int().min(5).max(3600),
     maxDailyDrawdownUsd: usd,
     maxTradesPerDay: z.number().int().min(1).max(1000)

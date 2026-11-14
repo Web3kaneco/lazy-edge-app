@@ -12,7 +12,8 @@ const CHANNELS = [
   'bots:list', 'bots:new', 'bots:save', 'bots:delete', 'bots:draft',
   'ledger:tickets', 'ledger:events',
   'accuracy:get', 'accuracy:run', 'clipboard:write',
-  'play:check', 'report:context', 'report:email', 'report:save'
+  'play:check', 'report:context', 'report:email', 'report:save',
+  'notices:get', 'notices:dismiss', 'notices:check', 'report:day'
 ] as const
 
 type Channel = (typeof CHANNELS)[number]
@@ -24,7 +25,7 @@ async function call<T>(channel: Channel, ...args: unknown[]): Promise<T> {
   return res.value as T
 }
 
-function on(event: 'state' | 'ticket', fn: (payload: any) => void): () => void {
+function on(event: 'state' | 'ticket' | 'notices', fn: (payload: any) => void): () => void {
   const listener = (_e: unknown, payload: unknown): void => fn(payload)
   ipcRenderer.on(event, listener)
   return () => ipcRenderer.removeListener(event, listener)

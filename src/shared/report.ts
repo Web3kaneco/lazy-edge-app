@@ -2,12 +2,14 @@
 // Plain text the user reads in full before it leaves, and it only leaves
 // through their own email. It carries what the app shows on screen: a play,
 // its check, a bot's share code. Never a key, a balance or a sign in.
+import { dayLines, type DayReport } from './dayreport'
 import type { PlayReview } from './review'
 import type { Change } from './share'
 
-export type ReportKind = 'bug' | 'play' | 'idea'
+export type ReportKind = 'day' | 'bug' | 'play' | 'idea'
 
 export const REPORT_KINDS: Record<ReportKind, { label: string; subject: string; prompt: string }> = {
+  day: { label: 'Send a day of trades', subject: 'Day report', prompt: 'Anything the team should know about this day? For example a game that went wrong, or what you would like the bot to do differently.' },
   bug: { label: 'Something broke', subject: 'Bug report', prompt: 'What were you doing, what did you expect, and what happened instead?' },
   play: { label: 'A play looks wrong', subject: 'Play report', prompt: 'What looks wrong about this play? For example the price, the result, or why the bot took it.' },
   idea: { label: 'An idea', subject: 'Idea', prompt: 'What would make Lazy Edge better for you?' }
@@ -52,10 +54,12 @@ export interface ReportInput {
   review?: PlayReview | null
   bot?: { name: string; code: string; changes: Change[] }
   problems?: { at: number; botName: string; title: string; outcome: string; detail: string }[]
+  day?: DayReport
 }
 
-// Anything longer than this is cut, so a report always fits the clipboard.
-export const REPORT_MAX = 20_000
+// Anything longer than this is cut. A busy day of trades fits; the email
+// carries it by paste, or the saved file as an attachment.
+export const REPORT_MAX = 60_000
 // Email programs on Windows cut a mailto link somewhere past 2,000 characters.
 export const MAILTO_MAX = 1_900
 const PASTE_NOTE = 'Your full Lazy Edge report is on your clipboard. Click on the empty line below, press Ctrl+V to paste it, then press Send.\n\n'
@@ -64,8 +68,8 @@ const money = (n: number | null): string => n === null ? 'open' : `${n < 0 ? '-'
 const when = (t: number): string => new Date(t).toLocaleString()
 const MARK = { ok: 'OK  ', look: 'LOOK', bad: 'BAD ', info: 'NOTE' } as const
 
-export function reportSubject(kind: ReportKind, version: string, playTitle?: string): string {
-  return `Lazy Edge ${version} ${REPORT_KINDS[kind].subject}${playTitle ? `: ${playTitle}` : ''}`.slice(0, 160)
+export function reportSubject(kind: ReportKind, version: string, about?: string): string {
+  return `Lazy Edge ${version} ${REPORT_KINDS[kind].subject}${about ? `: ${about}` : ''}`.slice(0, 160)
 }
 
 export function buildReport(r: ReportInput): string {
@@ -111,6 +115,11 @@ export function buildReport(r: ReportInput): string {
       ? `Changed from the measured defaults: ${r.bot.changes.map((c) => `${c.field} ${JSON.stringify(c.from)} to ${JSON.stringify(c.to)}`).join('; ')}`
       : 'At the measured defaults.')
     out.push(`Share code: ${r.bot.code}`)
+  }
+
+  if (r.day) {
+    section('The day')
+    out.push(...dayLines(r.day))
   }
 
   if (r.problems?.length) {

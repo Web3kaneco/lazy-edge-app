@@ -65,6 +65,7 @@ export function defaultBot(id: string, name: string): BotSettings {
       noEntryFinalS: 90, // the overtime wipeout
       noOvertime: true,
       onePositionPerMarket: true, // the backtest harness
+      noOpposingBets: true, // the 2026-11-14 ledger audit: both moneylines, both sides of one rung
       autoCancelS: 120, // UserConfig.auto_cancel_seconds
       maxDailyDrawdownUsd: 50, // UserConfig.max_daily_drawdown_usd
       maxTradesPerDay: 40

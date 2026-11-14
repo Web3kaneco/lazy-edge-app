@@ -3,6 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { release } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
+import { dayBounds, tradingDay } from '@shared/day'
 import { mailtoUrl, REPORT_MAX } from '@shared/report'
 import { defaultBot } from '@shared/ruleset'
 import type { ProviderId } from '@shared/schema'
@@ -14,6 +15,7 @@ import { Supervisor } from './bots/supervisor'
 import { RELEASES_URL, SUPPORT_EMAIL } from './config'
 import { auth } from './data/auth'
 import { lazyedge } from './data/lazyedge'
+import { notices } from './data/notices'
 import { ledger } from './store/ledger'
 import { settingsStore } from './store/settings'
 import { terms } from './store/terms'
@@ -179,7 +181,7 @@ function registerIpc(): void {
   })
   handle('bots:delete', (id: string) => settingsStore.deleteBot(String(id)))
   // Write only: the renderer can put a share code on the clipboard, never read it.
-  handle('clipboard:write', (text: string) => clipboard.writeText(String(text).slice(0, 20_000)))
+  handle('clipboard:write', (text: string) => clipboard.writeText(String(text).slice(0, REPORT_MAX)))
   handle('bots:draft', async (sentence: string, provider: ProviderId, model?: string) => {
     const guide = await lazyedge.skill().catch(() => '')
     return draftStrategy(ai(provider), String(sentence), guide, model)
@@ -202,11 +204,30 @@ function registerIpc(): void {
   // Reports leave only through the user's own email program, addressed here
   // and never by the page. The full text goes on the clipboard too, since a
   // mailto link holds only about 2,000 characters.
+  handle('notices:get', () => notices.state())
+  handle('notices:dismiss', (id: string) => notices.dismiss(String(id)))
+  handle('notices:check', () => notices.check().then(() => notices.state()))
+
   handle('report:context', () => ({
     os: `Windows ${release()} ${process.arch}`,
     supportEmail: SUPPORT_EMAIL,
     problems: supervisor.state.recent.filter((e) => /rejected|failed|error/.test(e.outcome)).slice(0, 20)
   }))
+  // One trading day for a day report: its trades, and how many plays each bot
+  // passed on and why. Read only, from the local ledger.
+  handle('report:day', (day: string) => {
+    const d = String(day)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new Error('not a day')
+    const { from, to } = dayBounds(d)
+    const tickets = ledger.tickets(3650).filter((t) => tradingDay(t.createdAt) === d)
+    const skips: Record<string, Record<string, number>> = {}
+    for (const e of ledger.eventsBetween(from, to)) {
+      if (e.type !== 'skip') continue
+      const g = (skips[e.botId] ??= {})
+      g[e.gate] = (g[e.gate] ?? 0) + 1
+    }
+    return { tickets, skips }
+  })
   handle('report:email', async (subject: string, text: string) => {
     const report = String(text).slice(0, REPORT_MAX)
     clipboard.writeText(report)
@@ -242,6 +263,7 @@ app.whenReady().then(async () => {
   if (app.isPackaged) Menu.setApplicationMenu(null)
   registerIpc()
   createWindow()
+  notices.start((s) => send('notices', s))
 
   // Unsigned builds still check; installs pick updates up properly once the
   // build is signed (decision 15).
@@ -253,7 +275,13 @@ app.whenReady().then(async () => {
       const { autoUpdater } = await import('electron-updater')
       autoUpdater.autoDownload = false
       autoUpdater.autoInstallOnAppQuit = false
+      // Asked once per version a session; the banner and a Windows
+      // notification keep saying it after that.
+      const asked = new Set<string>()
       autoUpdater.on('update-available', async (info) => {
+        notices.updateAvailable(info.version)
+        if (asked.has(info.version)) return
+        asked.add(info.version)
         const { response } = await dialog.showMessageBox(win!, {
           type: 'info', title: 'Lazy Edge', buttons: ['Download', 'Later'], defaultId: 0, cancelId: 1, noLink: true,
           message: `Version ${info.version} is available.`,
@@ -261,8 +289,9 @@ app.whenReady().then(async () => {
         })
         if (response === 0) void shell.openExternal(`${RELEASES_URL}/tag/v${encodeURIComponent(info.version)}`)
       })
-      autoUpdater.on('error', () => { /* offline or no release yet; checked again next launch */ })
+      autoUpdater.on('error', () => { /* offline or no release yet; checked again later */ })
       void autoUpdater.checkForUpdates().catch(() => {})
+      setInterval(() => void autoUpdater.checkForUpdates().catch(() => {}), 6 * 3_600_000)
     } catch { /* no update channel reachable */ }
   }
 })

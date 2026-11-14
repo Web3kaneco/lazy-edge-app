@@ -1,6 +1,6 @@
 import { constants, generateKeyPairSync, verify } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { hotPlayContract, kalshiRung, mlbEdges, nbaLiveEdges, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, parseNbaClock, parseNflClock } from '../src/main/data/normalize'
+import { hotPlayContract, kalshiRung, mlbEdges, nbaLiveEdges, nbaSpreadLadder, nflBoardPhase, nflBoardRows, nflHotPlays, nflMarketMaps, parseNbaClock, parseNflClock } from '../src/main/data/normalize'
 import { resolveSide } from '../src/main/rules/side'
 import { kalshiAsk, kalshiBalance, kalshiHeaders } from '../src/main/venues/kalshi'
 
@@ -356,5 +356,28 @@ describe('NBA, LiveEdgeResponse', () => {
     expect(parseNbaClock('1:05.3', 4)!.secondsRemaining).toBe(65)
     expect(parseNbaClock('3:00', 5)!.overtime).toBe(true)
     expect(parseNbaClock('', 0)).toBeNull()
+  })
+})
+
+describe('NFL board rows once the game is under way', () => {
+  const hour = 3_600_000
+  it('is pregame only before kickoff', () => {
+    expect(nflBoardPhase({ kickoff: new Date(NOW + hour).toISOString(), status: 'SCHEDULED' }, NOW).phase).toBe('pregame')
+  })
+  it('turns live with no clock at kickoff, in progress, or with no readable kickoff', () => {
+    expect(nflBoardPhase({ kickoff: new Date(NOW - 60_000).toISOString(), status: 'SCHEDULED' }, NOW)).toEqual({ phase: 'live', clock: null })
+    expect(nflBoardPhase({ kickoff: new Date(NOW + hour).toISOString(), status: 'IN_PROGRESS' }, NOW).phase).toBe('live')
+    expect(nflBoardPhase({ status: 'SCHEDULED' }, NOW).phase).toBe('live')
+    expect(nflBoardPhase(undefined, NOW).phase).toBe('live')
+  })
+})
+
+describe('NBA rows once the game is under way', () => {
+  const row = { game_id: '99', trade_signal: 'BUY', target_side: 'YES', target_kalshi_ticker: 'KXNBAGAME-99JAN01AAABBB-BBB', our_prob: 0.6, edge_score: 0.08, kalshi_implied: 0.52, signal_age_s: 5 }
+  it('is pregame with no clock and no score', () => {
+    expect(nbaLiveEdges([{ ...row, period: 0, clock: '' }], NOW).signals[0]!.phase).toBe('pregame')
+  })
+  it('is live once points are scored, even if the feed drops the period', () => {
+    expect(nbaLiveEdges([{ ...row, period: 0, clock: '', home_score: 12, away_score: 9 }], NOW).signals[0]!.phase).toBe('live')
   })
 })

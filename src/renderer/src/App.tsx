@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { ReportKind } from '@shared/report'
 import type { AccountSettings } from '@shared/schema'
-import { ago, api, useEngine } from './api'
+import { ago, api, useEngine, useNotices } from './api'
+import { NoticeBar } from './Notices'
 import { Account } from './screens/Account'
 import { Board } from './screens/Board'
 import { Bots } from './screens/Bots'
@@ -23,10 +25,12 @@ export function App() {
   const [screen, setScreen] = useState<Screen>('Dashboard')
   // The play a ledger row asked to report, carried to the Report screen.
   const [reportTicket, setReportTicket] = useState<string | null>(null)
+  const [reportKind, setReportKind] = useState<ReportKind | undefined>(undefined)
   const [account, setAccount] = useState<AccountSettings | null>(null)
   const [bootError, setBootError] = useState('')
   const [termsAt, setTermsAt] = useState<string | null | undefined>(undefined)
   const engine = useEngine()
+  const notices = useNotices()
 
   const refresh = useCallback(async () => {
     setBootError('')
@@ -108,16 +112,17 @@ export function App() {
           </div>
         </aside>
         <div className="main">
+          <NoticeBar state={notices} />
           <main className="page">
-            {screen === 'Dashboard' && <Dashboard engine={engine} />}
+            {screen === 'Dashboard' && <Dashboard engine={engine} onSendDay={() => { setReportTicket(null); setReportKind('day'); setScreen('Report') }} />}
             {screen === 'Bots' && <Bots />}
             {screen === 'Board' && <Board engine={engine} />}
             {screen === 'Results' && <Results />}
-            {screen === 'Ledger' && <Ledger onReport={(id) => { setReportTicket(id); setScreen('Report') }} />}
+            {screen === 'Ledger' && <Ledger onReport={(id) => { setReportTicket(id); setReportKind(undefined); setScreen('Report') }} />}
             {screen === 'Keys' && <Keys />}
             {screen === 'Account' && account && <Account account={account} onSaved={setAccount} onSignOut={refresh} />}
             {screen === 'Help' && <Help />}
-            {screen === 'Report' && <Report ticketId={reportTicket} />}
+            {screen === 'Report' && <Report ticketId={reportTicket} startKind={reportKind} />}
             {screen === 'Terms' && <Terms acceptedAt={termsAt} />}
           </main>
         </div>

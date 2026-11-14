@@ -6,7 +6,7 @@ declare global {
   interface Window {
     lazyedge: {
       call<T = any>(channel: string, ...args: unknown[]): Promise<T>
-      on(event: 'state' | 'ticket', fn: (payload: any) => void): () => void
+      on(event: 'state' | 'ticket' | 'notices', fn: (payload: any) => void): () => void
     }
   }
 }

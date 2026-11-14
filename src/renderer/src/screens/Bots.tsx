@@ -179,6 +179,7 @@ export function Bots() {
             <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>
               <Toggle on={edit.guards.noOvertime} onChange={(v) => set((b) => { b.guards.noOvertime = v })} label={<>No entries in overtime<Tip text={tip('No entries in overtime')} /></>} />
               <Toggle on={edit.guards.onePositionPerMarket} onChange={(v) => set((b) => { b.guards.onePositionPerMarket = v })} label={<>One position per market<Tip text={tip('One position per market')} /></>} />
+              <Toggle on={edit.guards.noOpposingBets} onChange={(v) => set((b) => { b.guards.noOpposingBets = v })} label={<>Never bet against itself<Tip text={tip('Never bet against itself')} /></>} />
             </div>
             <p className="small muted" style={{ marginTop: 12 }}>Every position is held to settlement in this version.<Tip text={tip('Hold to settlement')} /></p>
             {account && <Limits bot={edit} account={account} />}

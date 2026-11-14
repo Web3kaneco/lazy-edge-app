@@ -5,7 +5,7 @@ import type { AccountSettings, BotSettings } from '@shared/schema'
 import { ago, api, usd, type EngineState, type Ticket } from '../api'
 import { Tip } from '../ui'
 
-export function Dashboard({ engine }: { engine: EngineState | null }) {
+export function Dashboard({ engine, onSendDay }: { engine: EngineState | null; onSendDay: () => void }) {
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [account, setAccount] = useState<AccountSettings | null>(null)
   const [bots, setBots] = useState<BotSettings[]>([])
@@ -54,6 +54,7 @@ export function Dashboard({ engine }: { engine: EngineState | null }) {
           <h2>Today's profit</h2>
           <div className={`stat ${pnl((v) => v !== 'paper') < 0 ? 'bad' : ''}`}>{usd(pnl((v) => v !== 'paper'))}</div>
           <div className="stat-label has-tip" data-tip="The trading day runs from 4 AM to 4 AM your time, so a late game counts with the night it started.">real money, settled since 4 AM · paper {usd(pnl((v) => v === 'paper'))} · {open.length} trades still open</div>
+          <button className="btn" style={{ marginTop: 10 }} onClick={onSendDay} title="Send a day of trades to the Lazy Edge team so they can look at it with you and suggest changes to your bots.">Send a day to the team</button>
         </div>
       </div>
 

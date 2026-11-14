@@ -112,8 +112,25 @@ export interface NflMarketMap {
   kalshi_total_over?: string
   kalshi_spread_home?: string
   kalshi_spread_away?: string
+  kickoff?: string
+  status?: string
 }
 
+// The board is priced before kickoff. Once a game is under way, by its status
+// or because kickoff has passed, its board rows are in game plays priced off
+// a pregame number. They become live with no clock: a pregame bot never takes
+// them, and a live bot refuses them on the clock gate. In game trading comes
+// from the hot plays, which carry a clock. A game whose kickoff cannot be read
+// counts as under way, so a pregame bot never guesses.
+const NFL_UNDER_WAY = ['IN_PROGRESS', 'HALFTIME']
+export function nflBoardPhase(game: NflMarketMap | undefined, now: number): Pick<Signal, 'phase' | 'clock'> {
+  const status = String(game?.status ?? '').toUpperCase()
+  const kickoff = Date.parse(String(game?.kickoff ?? ''))
+  const started = !Number.isFinite(kickoff) || kickoff <= now || NFL_UNDER_WAY.includes(status) || status.includes('FINAL')
+  return { phase: started ? 'live' : 'pregame', clock: null }
+}
+
+// Each game whole, so the board can read its kickoff and status too.
 export function nflMarketMaps(edges: any): Record<string, NflMarketMap> {
   const games: any[] = Array.isArray(edges) ? edges : edges?.games ?? edges?.edges ?? []
   const out: Record<string, NflMarketMap> = {}
@@ -329,6 +346,11 @@ export function nbaRowProblem(r: any): string | null {
   return null
 }
 
+// A game with a clock or any points on the board is under way, even when the
+// feed drops its period, so a pregame bot never takes it.
+const nbaPhase = (row: any, clock: Signal['clock']): Signal['phase'] =>
+  clock || (num(row?.home_score) ?? 0) + (num(row?.away_score) ?? 0) > 0 ? 'live' : 'pregame'
+
 export function nbaLiveEdges(body: any, now: number): Normalized {
   const out: Normalized = { signals: [], refused: [] }
   for (const r of Array.isArray(body) ? body : []) {
@@ -350,7 +372,7 @@ export function nbaLiveEdges(body: any, now: number): Normalized {
     const team = home ? r.home_team : r.away_team
     out.signals.push({
       key: `nba:${gid}:MONEYLINE:${home ? 'home' : 'away'}`, sport: 'NBA', lane: 'MONEYLINE',
-      phase: clock ? 'live' : 'pregame', gameId: gid,
+      phase: nbaPhase(r, clock), gameId: gid,
       title: `${r.away_team ?? ''} @ ${r.home_team ?? ''} ${team ?? ''} to win`.trim(),
       signalType: home ? 'BUY_HOME' : 'BUY_AWAY', explicitSide: 'yes',
       ourP: home ? pHome : 1 - pHome,
@@ -402,7 +424,7 @@ export function nbaSpreadLadder(liveRow: any, rungs: any, now: number): Normaliz
     const edge = num(r.edge)
     out.signals.push({
       key: `nba:${gid}:SPREAD:${ticker}:${side}`, sport: 'NBA', lane: 'SPREAD',
-      phase: clock ? 'live' : 'pregame', gameId: gid,
+      phase: nbaPhase(liveRow, clock), gameId: gid,
       title: `${liveRow.away_team ?? ''} @ ${liveRow.home_team ?? ''} ${r.team} ${side === 'yes' ? 'by over' : 'not by over'} ${line}`.trim(),
       signalType: `BUY_SPREAD_${sideWord}`, explicitSide: side,
       ourP: side === 'yes' ? pYes : 1 - pYes,
