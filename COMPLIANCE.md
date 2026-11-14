@@ -13,13 +13,16 @@ The app is only useful with a Lazy Edge key. Open sourcing the client exposes no
 
 ## The one rule
 
-Exchange data and exchange keys stay between the user's computer and the exchange. Nothing from the user's Kalshi account, and no Kalshi market data the app reads, is ever sent to Lazy Edge.
+Exchange data and exchange keys stay between the user's computer and the exchange. The app never sends Lazy Edge anything from the user's Kalshi account or any Kalshi market data it reads: no key, balance, position list, order book or price feed.
+
+The one exception is a report the user chooses to send. From the Report screen a user can send the Lazy Edge team a play or a day of their own trades: what each bot traded, at what price and fee, and how it settled, with the bot's settings. That is the user's own trading record, shared by the user for help with their own trading. The report never holds a key, a password or a balance; the user reads all of it first; and it leaves only through the user's own email, never by the app.
 
 | Flow | What travels |
 |---|---|
 | Lazy Edge to the user's computer | Lazy Edge numbers and edges |
 | Kalshi to and from the user's computer | Prices, balance, positions and orders |
 | The user's computer to Lazy Edge | Only the Lazy Edge API key on each call. No Kalshi key, no positions, no fills, no prices |
+| The user's own email to Lazy Edge support | Only a report the user wrote, read and sent: their own trades and bot settings, never a key, password or balance |
 | GitHub to the user's computer | Release files and the team's notices file. The app sends only the request for the file |
 
 This is what makes each user's use of Kalshi their own trading, which is the use Kalshi's Developer Agreement allows. Any AI provider a user connects is the user's own account, used with the user's own key for the user's own trading.
@@ -30,7 +33,7 @@ This is what makes each user's use of Kalshi their own trading, which is the use
 |---|---|---|
 | §1, §4.1.1 | The API user must be a Kalshi member and accept the agreement. | The Kalshi key screen says the account and key are the user's own and that Kalshi's terms apply. |
 | §3 | API use is limited to a member's own trading. | Orders go only to the account of the configured key. No shared or pooled accounts, no trading for anyone else. |
-| §3.1 | No collecting, storing or sharing API data except for the member's own trading. | No telemetry, analytics or crash reports. Kalshi data is cached locally only and never uploaded to Lazy Edge. |
+| §3.1 | No collecting, storing or sharing API data except for the member's own trading. | No telemetry, analytics or crash reports. Kalshi data is cached locally only and the app never uploads it. A user may email their own trades to support in a report they read first, for help with their own trading. |
 | §3.2 | No facilitating other members' trading or account creation; no Kalshi password elsewhere. | API keys only, never the Kalshi password. No referral or sign up flows. |
 | §3.3 | No market manipulation. | No place and cancel strategies. Orders carry Kalshi's self trade prevention. |
 | §3.5 | No benchmarking or monitoring of Kalshi's performance. | Quote age is shown to the user; nothing measures Kalshi's latency or uptime. |
