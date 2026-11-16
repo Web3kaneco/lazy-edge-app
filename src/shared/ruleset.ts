@@ -67,6 +67,8 @@ export function defaultBot(id: string, name: string): BotSettings {
     },
     // Held to settlement until the user picks an exit; +10c is John's scalp.
     exit: { mode: 'hold', targetC: 10 },
+    // Used only with COMBO in the lanes.
+    combo: { legs: 2, maxPerDay: 5, only: false },
     guards: {
       noEntryFinalS: 90, // the overtime wipeout
       noOvertime: true,

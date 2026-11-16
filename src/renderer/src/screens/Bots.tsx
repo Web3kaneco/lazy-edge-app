@@ -150,6 +150,18 @@ export function Bots() {
               <Field label="Labels" tip={tip('Labels')} hint="ILLIQUID, ROLE_PRICED and UNPRICED are never traded and cannot be enabled."><Chips options={TradeableLabel.options} tips={tip} value={edit.market.labels} onChange={(v) => set((b) => { b.market.labels = v })} /></Field>
               <Field label="Venues" tip={tip('Venues')} hint="Best price after fees wins among these. A live bot skips any venue without a usable balance."><Chips options={VenueId.options} value={edit.market.venues} onChange={(v) => set((b) => { b.market.venues = v })} /></Field>
             </div>
+            {edit.market.lanes.includes('COMBO') && (
+              <>
+                <div className="grid cols-2" style={{ marginTop: 10 }}>
+                  <NumberField label="Legs per combo" tip={tip('COMBO')} step={1} min={2} max={4} value={edit.combo.legs} measured={M.combo.legs} onChange={(v) => set((b) => { b.combo.legs = Math.round(v) })} />
+                  <NumberField label="Combos per day" step={1} min={1} max={50} value={edit.combo.maxPerDay} measured={M.combo.maxPerDay} onChange={(v) => set((b) => { b.combo.maxPerDay = Math.round(v) })} />
+                </div>
+                <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>
+                  <Toggle on={edit.combo.only} onChange={(v) => set((b) => { b.combo.only = v })} label={<>Combos only<Tip text={tip('Combos only')} /></>} />
+                </div>
+                <p className="small muted" style={{ marginTop: 8 }}>Legs are plays this bot would take on its own, one per game, priced off Kalshi. Each combo is priced by a real quote from Kalshi's market makers and bought only if our chance beats it by the minimum edge after fees. Combos are held to settlement. Paper combos need a Kalshi key to ask for quotes.</p>
+              </>
+            )}
 
             <div className="section">Entry</div>
             <div className="grid cols-2">

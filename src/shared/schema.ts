@@ -6,7 +6,9 @@ import { z } from 'zod'
 export const Sport = z.enum(['NFL', 'MLB', 'NBA', 'WC'])
 // TEAM_TOTAL is its own lane on the board (nfl_publish v60) and is not yet
 // graded, so it is never enabled by default.
-export const Lane = z.enum(['MONEYLINE', 'SPREAD', 'TOTAL', 'TEAM_TOTAL', 'PROP'])
+// COMBO is not a feed lane: it lets the bot tie plays it would take alone into
+// one Kalshi combo (shared/combos.ts).
+export const Lane = z.enum(['MONEYLINE', 'SPREAD', 'TOTAL', 'TEAM_TOTAL', 'PROP', 'COMBO'])
 export const Phase = z.enum(['pregame', 'live', 'both'])
 export const Quarter = z.enum(['Q1', 'Q2', 'Q3', 'Q4'])
 // hold: keep to settlement. limit: rest a sell at entry + target cents the
@@ -125,6 +127,14 @@ export const BotSettings = z.object({
     // Cents above the entry price to sell at.
     targetC: z.number().int().min(1).max(50)
   }).default({ mode: 'hold', targetC: 10 }),
+
+  // With COMBO in the lanes: how many legs, how many combos a day, and
+  // whether the plays are taken only as combo legs and never alone.
+  combo: z.object({
+    legs: z.number().int().min(2).max(4),
+    maxPerDay: z.number().int().min(1).max(50),
+    only: z.boolean()
+  }).default({ legs: 2, maxPerDay: 5, only: false }),
 
   guards: z.object({
     noEntryFinalS: z.number().int().min(0).max(900),

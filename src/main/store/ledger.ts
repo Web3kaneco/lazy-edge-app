@@ -55,6 +55,9 @@ export interface Ticket {
   // How the bot gets out, when it is set to exit before settlement. Missing
   // on a ticket held to settlement and on tickets before 0.6.0.
   exit?: TicketExit | null
+  // A combo's legs, so each counts against its own game's limits and a bot
+  // never bets against a leg it holds inside a combo.
+  legs?: { contract: string; side: ContractSide; gameId: string }[]
 }
 
 export type LedgerEvent =

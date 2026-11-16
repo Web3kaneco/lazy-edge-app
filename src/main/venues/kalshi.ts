@@ -312,6 +312,83 @@ export class KalshiVenue implements Venue {
     }
   }
 
+  // ── Combos ───────────────────────────────────────────────────────────
+  // A combo is its own market, created from its legs, priced by request for
+  // quote. Every call here is Kalshi's documented API (internal/combos.md).
+
+  private collections: { at: number; list: { ticker: string; events: Set<string> }[] } | null = null
+
+  // The open combo collection that holds every leg's event. Public read.
+  async comboCollection(eventTickers: string[]): Promise<string | null> {
+    if (!this.collections || Date.now() - this.collections.at > 600_000) {
+      const res = await requestJson<{ multivariate_contracts?: Record<string, any>[] }>(`${this.host}${PREFIX}/multivariate_event_collections?status=open&limit=200`)
+      this.collections = {
+        at: Date.now(),
+        list: (res.multivariate_contracts ?? []).map((c) => ({
+          ticker: String(c.collection_ticker ?? ''),
+          events: new Set<string>([...(c.associated_event_tickers ?? []), ...(c.associated_events ?? []).map((e: any) => e?.ticker)].filter(Boolean).map(String))
+        })).filter((c) => c.ticker)
+      }
+    }
+    return this.collections.list.find((c) => eventTickers.every((e) => c.events.has(e)))?.ticker ?? null
+  }
+
+  // Creates the combo market for these legs, or returns the one that exists.
+  async createCombo(collection: string, legs: { contract: string; event: string; side: ContractSide }[]): Promise<string> {
+    const res = await this.authed<{ market_ticker?: string }>('POST', `/multivariate_event_collections/${encodeURIComponent(collection)}`, {
+      selected_markets: legs.map((l) => ({ market_ticker: l.contract, event_ticker: l.event, side: l.side }))
+    })
+    if (!res.market_ticker) throw new Error('Kalshi created no combo market')
+    return String(res.market_ticker)
+  }
+
+  // Sized in contracts, or as a dollar budget fees included, so the maker
+  // sizes the quote to what the bot may spend whatever the price.
+  async createRfq(marketTicker: string, size: { contracts: number } | { budgetUsd: number }): Promise<string> {
+    const res = await this.authed<{ id?: string }>('POST', '/communications/rfqs', {
+      market_ticker: marketTicker,
+      rest_remainder: false,
+      ...('contracts' in size ? { contracts: size.contracts } : { target_cost_dollars: size.budgetUsd.toFixed(2), target_cost_excludes_fees: false })
+    })
+    if (!res.id) throw new Error('Kalshi returned no request id')
+    return String(res.id)
+  }
+
+  // Open quotes answering this request, in cents, best price first.
+  async rfqQuotes(rfqId: string): Promise<{ id: string; yesBidC: number; noBidC: number; contracts: number }[]> {
+    const res = await this.authed<{ quotes?: Record<string, any>[] }>('GET', '/communications/quotes', undefined, `?rfq_id=${encodeURIComponent(rfqId)}&status=open&limit=100`)
+    return (res.quotes ?? []).map((q) => ({
+      id: String(q.id ?? ''),
+      yesBidC: Math.round(Number(q.yes_bid_dollars) * 10000) / 100,
+      noBidC: Math.round(Number(q.no_bid_dollars) * 10000) / 100,
+      contracts: Number(q.contracts_fp ?? 0)
+    })).filter((q) => q.id && Number.isFinite(q.yesBidC) && Number.isFinite(q.noBidC))
+  }
+
+  async acceptQuote(rfqId: string, quoteId: string, side: ContractSide): Promise<void> {
+    await this.authed('PUT', `/communications/rfqs/${encodeURIComponent(rfqId)}/quotes/${encodeURIComponent(quoteId)}/accept`, { accepted_side: side })
+  }
+
+  async deleteRfq(rfqId: string): Promise<void> {
+    await this.authed('DELETE', `/communications/rfqs/${encodeURIComponent(rfqId)}`)
+  }
+
+  // Our fills on one market since a time: contracts, average price on our
+  // side in cents, and fees, from Kalshi's own record.
+  // Our fills on one market since a time, each as Kalshi wrote it: action,
+  // side, count, the price on each side in cents, and fee.
+  async fillsSince(ticker: string, sinceMs: number): Promise<{ action?: string; side?: string; contracts: number; yesC: number; noC: number; feeUsd: number }[]> {
+    const res = await this.authed<{ fills?: Record<string, any>[] }>('GET', '/portfolio/fills', undefined, `?ticker=${encodeURIComponent(ticker)}&min_ts=${Math.floor(sinceMs / 1000)}&limit=200`)
+    return (res.fills ?? []).map((f) => ({
+      action: f.action === undefined ? undefined : String(f.action),
+      side: f.side === undefined ? undefined : String(f.side),
+      contracts: num(f.count_fp ?? f.count),
+      yesC: toC(num(f.yes_price_dollars)),
+      noC: toC(num(f.no_price_dollars)),
+      feeUsd: num(f.fee_cost)
+    })).filter((f) => f.contracts > 0)
+  }
+
   // Every page of the market's orders, so a busy market cannot hide the one
   // we sent. A list that cannot be read to the end throws: unknown, never
   // absent, so the caller never sends the sell again on a guess.

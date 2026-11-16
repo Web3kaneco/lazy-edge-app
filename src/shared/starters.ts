@@ -128,6 +128,18 @@ export const STARTERS: Starter[] = [
     })
   },
   {
+    key: 'nba-combos',
+    name: 'NBA two leg combos',
+    summary: 'Ties two NBA plays from different games into one Kalshi combo when our chance that both hit beats a real quote from Kalshi\'s market makers. Takes nothing alone. Needs a Kalshi key, even on paper.',
+    build: make('nba-combos', 'NBA two leg combos', (b) => {
+      b.market.sports = ['NBA']
+      b.market.lanes = ['MONEYLINE', 'SPREAD', 'PROP', 'COMBO']
+      b.market.labels = ['PRICE_GAP']
+      b.entry.priceBandC = [40, 92]
+      b.combo = { legs: 2, maxPerDay: 5, only: true }
+    })
+  },
+  {
     key: 'explorer',
     name: 'Explorer, tiny size',
     summary: 'Takes every tradeable label at a lower edge bar and $2 a trade at most, so Results can show which labels and lanes are worth keeping.',

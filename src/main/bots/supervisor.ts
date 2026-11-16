@@ -7,6 +7,9 @@ import { EventEmitter } from 'node:events'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { checkLock, dayPct, rollDay, type LockDay, type LockState } from '@shared/profitlock'
+import { acceptSideFor, bestQuote, eventOf, fillMatches, fillPosition, pickCombo, type ComboLeg, type QuoteReading } from '@shared/combos'
+import { createHash } from 'node:crypto'
+import { kalshiFee } from '../rules/fees'
 import { tradingDay } from '@shared/day'
 import { addExitFill, bidFromOtherAsk, exitFee, newExit, paperExitFill, positionPnl, withOrderTotals, type CashOutResult, type TicketExit } from '@shared/exits'
 import { isLimitGate, type HeldBack, type LimitGate } from '@shared/limits'
@@ -34,6 +37,22 @@ const BOARD_EVERY_MS = 5 * 60_000 // pregame boards move slowly; live plays are 
 const NBA_LADDER_EVERY_MS = 30_000
 const NBA_PROPS_EVERY_MS = 30_000
 const LOCK_EVERY_MS = 30_000
+// Quotes a paper or dry run bot may ask for and never take, across the app,
+// in any hour; and how long a combo waits for makers to answer.
+const PAPER_RFQ_PER_HOUR = 6
+const COMBO_QUOTE_WAIT_S = 5
+const LIVE_RFQ_PER_HOUR = 20
+
+// How a combo quote reads, once a live fill has confirmed it, and whether
+// live combos were switched off by a fill that did not match.
+interface ComboPricing { confirmed: QuoteReading | null; disabled: string | null }
+const comboFile = (): string => join(app.getPath('userData'), 'combo-pricing.json')
+function readComboPricing(): ComboPricing {
+  try { return existsSync(comboFile()) ? { confirmed: null, disabled: null, ...JSON.parse(readFileSync(comboFile(), 'utf8')) } : { confirmed: null, disabled: null } } catch { return { confirmed: null, disabled: 'the combo pricing file could not be read' } }
+}
+function writeComboPricing(p: ComboPricing): void {
+  writeFileSync(comboFile(), JSON.stringify(p))
+}
 
 // The profit lock's record of the day, kept on disk so a restart keeps the
 // day's start and high.
@@ -108,6 +127,10 @@ export class Supervisor extends EventEmitter {
   private nbaPropsCache: { at: number; body: unknown } | null = null
   // Ticket id -> settlement passes spent waiting to read an exit's last fills.
   private settleTries = new Map<string, number>()
+  private rfqTimes: number[] = []
+  private liveRfqTimes: number[] = []
+  // Combo key -> when it was last asked about.
+  private comboTried = new Map<string, number>()
   private lastLockAt = 0
   private lockDay: LockDay | null = null
   private lockNowPct: number | null = null
@@ -468,6 +491,9 @@ export class Supervisor extends EventEmitter {
     const pendingGameUsd = new Map<string, number>()
     const pendingPositions: (Position & { gameId: string })[] = []
     const candidates: Candidate[] = []
+    const combos = bot.market.lanes.includes('COMBO')
+    const legs: ComboLeg[] = []
+    const legSignals = new Map<string, Signal>()
     for (const signal of fresh) {
       const ctx = this.context(bot, signal, mine, tickets, venues, openKeys)
       ctx.botTradesToday += pendingTrades
@@ -479,6 +505,13 @@ export class Supervisor extends EventEmitter {
       const what = `${decision.side.toUpperCase()} ${decision.contracts} @ ${decision.limitPriceC}c on ${decision.venue}, ev ${decision.evCents.toFixed(1)}c`
       verdict(signal, 'take', null, bot.decider.kind === 'agent' ? `${what}; the agent screens it first` : what)
       if (preview) continue
+      // A play priced off Kalshi can be a combo leg. A combos only bot takes
+      // it as a leg and never alone.
+      if (combos && decision.priceSource === 'kalshi' && signal.ourP !== null && signal.edgePp !== null) {
+        legs.push({ signalKey: signal.key, gameId: signal.gameId, title: signal.title, contract: decision.contract, side: decision.side, ourP: signal.ourP, askC: decision.limitPriceC, edgePp: signal.edgePp })
+        legSignals.set(signal.key, signal)
+      }
+      if (combos && bot.combo.only) continue
       pendingTrades++
       pendingGameUsd.set(signal.gameId, (pendingGameUsd.get(signal.gameId) ?? 0) + decision.costUsd)
       if (decision.venue !== 'paper' && !decision.dryRun) pendingLiveUsd += decision.costUsd
@@ -491,6 +524,7 @@ export class Supervisor extends EventEmitter {
       else candidates.push({ id: signal.key, signal, decision })
     }
 
+    if (combos && !preview && bot.decider.kind === 'rules') await this.tryCombo(bot, account, legs, legSignals)
     if (bot.decider.kind !== 'agent' || !bot.decider.provider || !candidates.length) return
     const screened = await screen(ai(bot.decider.provider), bot, candidates, this.guide)
     if (screened.error) this.log(bot.id, bot.name, `${candidates.length} tickets`, 'agent_error', `${screened.error}; nothing taken`)
@@ -548,8 +582,12 @@ export class Supervisor extends EventEmitter {
       now: Date.now(),
       venues,
       openMarketKeys: openKeys,
-      gamePositions: mine.filter((t) => isOpen(t) && t.gameId === signal.gameId).map((t) => ({ contract: t.contract, side: t.side })),
-      gameExposureUsd: openCost(mine.filter((t) => t.gameId === signal.gameId)),
+      // A combo counts on every game it has a leg in, and its legs are
+      // positions a single may not bet against.
+      gamePositions: mine.filter((t) => isOpen(t)).flatMap((t) => t.legs
+        ? t.legs.filter((l) => l.gameId === signal.gameId).map((l) => ({ contract: l.contract, side: l.side }))
+        : t.gameId === signal.gameId ? [{ contract: t.contract, side: t.side }] : []),
+      gameExposureUsd: openCost(mine.filter((t) => t.gameId === signal.gameId || t.legs?.some((l) => l.gameId === signal.gameId))),
       accountOpenExposureUsd: openCost(all.filter((t) => t.venue !== 'paper')),
       botDailyPnlUsd: realised(todays(mine)),
       accountDailyPnlUsd: realised(todays(all.filter((t) => t.venue !== 'paper'))),
@@ -697,6 +735,171 @@ export class Supervisor extends EventEmitter {
       } catch (err) {
         this.log(t.botId, t.botName, t.title, 'exit_failed', (err as Error).message.slice(0, 160))
       }
+    }
+  }
+
+  // ── Combos ───────────────────────────────────────────────────────────
+
+  // One combo a cycle at most, from the plays this bot approved this cycle,
+  // one leg per game. The quote is read by shared/combos.ts and refused when it
+  // does not add up. Paper and dry run ask makers for a real quote and never
+  // accept it (John, 2026-11-16), so they are capped per hour, only asked for
+  // a combo the bot would really take, and withdrawn the moment it is read.
+  // A live combo accepts the quote, reads its fill from Kalshi and checks the
+  // price against the reading: a match confirms the reading, a mismatch
+  // switches live combos off until the user looks at it. Until the reading is
+  // confirmed, a live combo is one contract.
+  private async tryCombo(bot: BotSettings, account: AccountSettings, legs: ComboLeg[], signals: Map<string, Signal>): Promise<void> {
+    const kalshi = this.venues.kalshi as KalshiVenue
+    const day = today()
+    const all = ledger.active(2)
+    const mine = all.filter((t) => t.botId === bot.id && t.signalKey.startsWith('combo:'))
+    if (mine.filter((t) => today(t.createdAt) === day && t.filledContracts > 0).length >= bot.combo.maxPerDay) return
+    const pick = pickCombo(legs, bot.combo.legs)
+    if (!pick) return
+    const key = `combo:${pick.legs.map((l) => `${l.contract}:${l.side}`).sort().join('+')}`
+    if (mine.some((t) => t.signalKey === key && (isOpen(t) || today(t.createdAt) === day))) return
+    // The same combo is asked about again no sooner than 15 minutes later.
+    if (Date.now() - (this.comboTried.get(key) ?? 0) < 15 * 60_000) return
+    const titles = pick.legs.map((l) => l.title).join(' + ')
+    const say = (outcome: string, detail: string): void => this.log(bot.id, bot.name, `Combo: ${titles}`, outcome, detail)
+    // Quotes never come under what the legs cost one by one, so a combo that
+    // cannot clear the edge even there is not worth a request.
+    if (pick.chance * 100 - pick.legsPriceC < bot.entry.minEdgePp) return
+    if (!kalshi.configured()) return say('combo_skipped', 'combos need a Kalshi key, even on paper, to ask for a quote')
+
+    const live = bot.mode === 'live' && bot.market.venues.includes('kalshi') && account.venues.kalshi.enabled
+    const dryRun = live && account.executionMode === 'dry_run'
+    const real = live && !dryRun
+    const pricing = readComboPricing()
+    // What one combo may spend: the bot's largest trade, never more than the
+    // cash on hand, and for real money never past the account's open limit.
+    const cash = real ? this.state.venues.kalshi?.balanceUsd ?? 0 : this.paperState().balanceUsd ?? 0
+    const room = real ? account.accountMaxOpenExposureUsd - openCost(all.filter((t) => t.venue !== 'paper')) : Infinity
+    const budgetUsd = Math.floor(Math.min(bot.size.maxTradeUsd, cash, room) * 100) / 100
+    if (budgetUsd < Math.max(1, bot.size.minTradeUsd)) return
+    if (real) {
+      if (account.killSwitch) return
+      if (pricing.disabled) return say('combo_skipped', `live combos are off: ${pricing.disabled}`)
+      this.liveRfqTimes = this.liveRfqTimes.filter((t) => Date.now() - t < 3_600_000)
+      if (this.liveRfqTimes.length >= LIVE_RFQ_PER_HOUR) return
+      this.liveRfqTimes.push(Date.now())
+    } else {
+      this.rfqTimes = this.rfqTimes.filter((t) => Date.now() - t < 3_600_000)
+      if (this.rfqTimes.length >= PAPER_RFQ_PER_HOUR) return
+      this.rfqTimes.push(Date.now())
+    }
+    this.comboTried.set(key, Date.now())
+
+    let rfq: string | null = null
+    let acceptTried = false
+    try {
+      const collection = await kalshi.comboCollection(pick.legs.map((l) => eventOf(l.contract)))
+      if (!collection) return say('combo_skipped', 'Kalshi offers no combo with these legs')
+      const market = await kalshi.createCombo(collection, pick.legs.map((l) => ({ contract: l.contract, event: eventOf(l.contract), side: l.side })))
+      // Until a live fill confirms how quotes read, a real combo is one contract.
+      rfq = await kalshi.createRfq(market, real && !pricing.confirmed ? { contracts: 1 } : { budgetUsd })
+      let best: ReturnType<typeof bestQuote<{ id: string; yesBidC: number; noBidC: number; contracts: number }>> = null
+      for (let i = 0; i < COMBO_QUOTE_WAIT_S && !best; i++) {
+        await new Promise((r) => setTimeout(r, 1000))
+        best = bestQuote(await kalshi.rfqQuotes(rfq), pick.legsPriceC, pricing.confirmed)
+      }
+      if (!best) return say('combo_skipped', `no quote that adds up within ${COMBO_QUOTE_WAIT_S}s for legs worth ${pick.legsPriceC}c`)
+      const priceC = best.price.buyYesC!
+      const reading = best.price.reading!
+      const edge = pick.chance * 100 - priceC - kalshiFee(priceC / 100, 1) * 100
+      if (edge < bot.entry.minEdgePp) return say('combo_skipped', `quote ${priceC}c leaves ${edge.toFixed(1)}pp after fees against our ${(pick.chance * 100).toFixed(1)}%, under the ${bot.entry.minEdgePp}pp minimum`)
+      const contracts = Math.floor(best.quote.contracts)
+      // The maker sized the quote; it must still fit the budget at its price.
+      // The first unconfirmed live combo is one contract, which may cost up to $1.
+      const cap = real && !pricing.confirmed ? Math.max(budgetUsd, 1) : budgetUsd
+      if (contracts < 1 || (contracts * priceC) / 100 > cap + 0.01) {
+        return say('combo_skipped', `the quote for ${best.quote.contracts} at ${priceC}c does not fit the $${cap} budget`)
+      }
+      const tags = signals.get(pick.legs[0]!.signalKey)
+      const now = Date.now()
+      const base: Ticket = {
+        id: `${createHash('sha256').update(`${bot.id}|${key}|${day}`).digest('hex').slice(0, 32)}-${now.toString(36)}`,
+        botId: bot.id, botName: bot.name, signalKey: key, gameId: `combo:${pick.legs.map((l) => l.gameId).join('+')}`, title: `Combo: ${titles}`,
+        venue: real ? 'kalshi' : 'paper', priceSource: 'kalshi', contract: market, side: 'yes',
+        contracts, limitPriceC: Math.round(priceC), evCents: edge,
+        costUsd: 0, status: 'filled', filledContracts: 0, avgFillC: null, feeUsd: 0, pnlUsd: null, venueOrderId: null,
+        createdAt: now, updatedAt: now,
+        why: `${pick.legs.length} legs, our chance ${(pick.chance * 100).toFixed(1)}% by ${pick.source === 'lazy_edge' ? 'Lazy Edge' : 'the legs multiplied'}, legs ${pick.legsPriceC}c one by one`,
+        audit: [`quote ${best.price.why}`, `reading ${reading}${pricing.confirmed ? ' (confirmed)' : ' (not yet confirmed by a live fill)'}`, ...pick.legs.map((l) => `leg ${l.side.toUpperCase()} ${l.contract} at ${l.askC}c, ours ${(l.ourP * 100).toFixed(1)}%`)],
+        error: null,
+        play: tags ? { ...playTags(tags), lane: 'COMBO', edgePp: edge, ourP: pick.chance } : undefined,
+        rules: rulesOf(bot),
+        exit: null,
+        legs: pick.legs.map((l) => ({ contract: l.contract, side: l.side, gameId: l.gameId }))
+      }
+      const write = (t: Ticket): void => { ledger.append({ type: 'ticket', ticket: t }); this.emit('ticket', t) }
+      if (!real) {
+        // The quote is read, never taken: the paper fill is the quote's price
+        // and size, with Kalshi's taker fee.
+        write(dryRun ? { ...base, status: 'dry_run' } : { ...base, filledContracts: contracts, avgFillC: priceC, costUsd: (contracts * priceC) / 100, feeUsd: exitFee(priceC, contracts, true) })
+        return say(dryRun ? 'dry_run' : 'filled', `YES ${contracts} @ ${priceC}c from a real quote, not taken`)
+      }
+
+      // The last moment, as for any order: a kill switch, dry run, the bot
+      // off or out of live, or new terms, made while quotes were read, win.
+      const nowAccount = settingsStore.account()
+      const nowBot = settingsStore.bots().find((b) => b.id === bot.id)
+      const stop = nowAccount.killSwitch ? 'the kill switch is on' : nowAccount.executionMode === 'dry_run' ? 'dry run is on' : !nowBot?.enabled || nowBot.mode !== 'live' ? 'the bot was switched off or out of live' : !terms.status().accepted ? 'the terms need accepting' : null
+      if (stop) return say('combo_skipped', `${stop}; the quote was not taken`)
+
+      const acceptedAt = Date.now()
+      acceptTried = true
+      let acceptError: string | null = null
+      // An accept whose answer is lost may still have filled, so the fills are
+      // read either way and whatever filled is recorded.
+      try { await kalshi.acceptQuote(rfq, best.quote.id, acceptSideFor(reading)) } catch (err) { acceptError = (err as Error).message.slice(0, 160) }
+
+      // Wait for the fills to settle: the full size, or the same count twice.
+      let rows: Awaited<ReturnType<KalshiVenue['fillsSince']>> = []
+      let last = -1
+      for (let i = 0; i < 12; i++) {
+        await new Promise((r) => setTimeout(r, 1000))
+        rows = await kalshi.fillsSince(market, acceptedAt)
+        const n = rows.reduce((s, f) => s + f.contracts, 0)
+        if (n >= contracts || (n > 0 && n === last)) break
+        last = n
+      }
+      if (!rows.length) {
+        write({ ...base, status: 'cancelled', error: acceptError ? `accept failed: ${acceptError}` : 'the maker did not confirm the quote' })
+        return say('cancelled', acceptError ? `the accept failed and nothing filled: ${acceptError}` : 'quote accepted, the maker did not confirm it')
+      }
+      // Each side that filled is its own ticket at its own price, so the
+      // ledger always holds what Kalshi holds.
+      const bySide = new Map<'yes' | 'no' | 'unknown', { n: number; cost: number; fee: number }>()
+      for (const f of rows) {
+        const side = fillPosition(f.action, f.side) ?? 'unknown'
+        const px = side === 'no' ? f.noC : f.yesC
+        const g = bySide.get(side) ?? { n: 0, cost: 0, fee: 0 }
+        bySide.set(side, { n: g.n + f.contracts, cost: g.cost + f.contracts * px, fee: g.fee + f.feeUsd })
+      }
+      const yes = bySide.get('yes')
+      const odd = [...bySide.entries()].filter(([s]) => s !== 'yes')
+      if (yes) {
+        const avg = Math.round((yes.cost / yes.n) * 100) / 100
+        write({ ...base, filledContracts: yes.n, avgFillC: avg, costUsd: yes.cost / 100, feeUsd: Math.round(yes.fee * 10000) / 10000, status: yes.n < contracts ? 'partial' : 'filled' })
+      }
+      for (const [side, g] of odd) {
+        write({ ...base, id: `${base.id}-${side}`, side: side === 'no' ? 'no' : 'yes', filledContracts: g.n, avgFillC: Math.round((g.cost / g.n) * 100) / 100, costUsd: g.cost / 100, feeUsd: g.fee, status: 'filled', error: `filled as ${side} where YES was expected` })
+      }
+      const yesAvg = yes ? yes.cost / yes.n : null
+      if (odd.length || yesAvg === null || !fillMatches(priceC, yesAvg)) {
+        const why = odd.length ? `a combo filled as ${odd.map(([s, g]) => `${g.n} ${s}`).join(' and ')} where YES was expected` : `a combo filled at ${yesAvg?.toFixed(2)}c where ${priceC}c was expected`
+        writeComboPricing({ ...pricing, confirmed: null, disabled: why })
+        ledger.append({ type: 'note', at: Date.now(), botId: bot.id, text: `Live combos switched off: ${why}. Check the position on Kalshi.` })
+        return say('combo_mismatch', `${why}; live combos are off until this is looked at`)
+      }
+      if (!pricing.confirmed) writeComboPricing({ ...pricing, confirmed: reading })
+      say('filled', `YES ${yes!.n} @ ${yesAvg.toFixed(2)}c, as the quote read`)
+    } catch (err) {
+      say('combo_failed', (err as Error).message.slice(0, 160))
+    } finally {
+      if (rfq && !acceptTried) await kalshi.deleteRfq(rfq).catch(() => {})
     }
   }
 

@@ -38,7 +38,7 @@ describe('share codes', () => {
 
   it('carry settings only', () => {
     const json = atob(shareCode(live).slice(7).replace(/-/g, '+').replace(/_/g, '/'))
-    expect(Object.keys(JSON.parse(json)).sort()).toEqual(['decider', 'entry', 'exit', 'guards', 'market', 'mode', 'name', 'pollS', 'size'])
+    expect(Object.keys(JSON.parse(json)).sort()).toEqual(['combo', 'decider', 'entry', 'exit', 'guards', 'market', 'mode', 'name', 'pollS', 'size'])
   })
 
   it('refuse anything that is not a valid bot', () => {
