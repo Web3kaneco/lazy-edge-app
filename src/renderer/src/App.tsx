@@ -157,7 +157,7 @@ function CashOutNote({ result, onClose }: { result: (CashOutResult & { why?: str
   const money = `${result.pnlUsd < 0 ? '−' : '+'}$${Math.abs(result.pnlUsd).toFixed(2)}`
   const lines = [
     ...(result.why ? [`The day profit lock fired: ${result.why}.`] : []),
-    `${result.botsOff} ${result.botsOff === 1 ? 'bot' : 'bots'} switched off and the kill switch is on. Switch bots back on and release the kill switch when you are ready to trade again.`,
+    `${result.botsOff} ${result.botsOff === 1 ? 'bot' : 'bots'} switched off. Switch them back on, and release the kill switch if it is on, when you are ready to trade again.`,
     result.contracts ? `Sold ${result.contracts} contracts: ${result.sold} positions in full${result.partly ? ` and ${result.partly} in part` : ''}, ${money} on what sold after fees.` : 'Nothing was sold.',
     ...result.kept.slice(0, 12).map((k) => `Kept ${k.title}: ${k.why}.`),
     ...(result.kept.length > 12 ? [`And ${result.kept.length - 12} more kept; every one is in the Ledger.`] : [])

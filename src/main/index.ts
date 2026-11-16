@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { dayBounds, tradingDay } from '@shared/day'
 import { mailtoUrl, REPORT_MAX } from '@shared/report'
 import { defaultBot } from '@shared/ruleset'
-import type { BotSettings, ProviderId } from '@shared/schema'
+import { AccountSettings, type BotSettings, type ProviderId } from '@shared/schema'
 import { STARTERS } from '@shared/starters'
 import type { CashOutResult } from '@shared/exits'
 import { changeNote, exportFiles, paperTestPlan, settingsChanges } from '@shared/testdata'
@@ -121,12 +121,14 @@ function saveLogged(doc: unknown): BotSettings {
 // Every bot off, the kill switch on, then every open position across every
 // bot sold at the bid. Shared by the Cash out all button and the day profit
 // lock, and written to the ledger either way.
-async function cashOut(onlyInProfit: boolean, why: string): Promise<CashOutResult> {
-  const on = settingsStore.bots().filter((b) => b.enabled)
+async function cashOut(onlyInProfit: boolean, why: string, scope: 'all' | 'live' | 'paper' = 'all'): Promise<CashOutResult> {
+  // A paper lock touches paper only; live bots, live positions and the kill
+  // switch are left exactly as they are.
+  const on = settingsStore.bots().filter((b) => b.enabled && (scope === 'all' || (scope === 'paper') === (b.mode === 'paper')))
   for (const b of on) saveLogged({ ...b, enabled: false })
-  await supervisor.killSwitch(true)
-  note(null, `Cash out ${why}${onlyInProfit ? ', positions in profit only' : ''}: ${on.length} bots switched off, kill switch on`)
-  const result = await supervisor.cashOutAll(onlyInProfit)
+  if (scope !== 'paper') await supervisor.killSwitch(true)
+  note(null, `Cash out ${why}${scope !== 'all' ? `, ${scope} only` : ''}${onlyInProfit ? ', positions in profit only' : ''}: ${on.length} bots switched off${scope !== 'paper' ? ', kill switch on' : ''}`)
+  const result = await supervisor.cashOutAll(onlyInProfit, scope)
   note(null, `Cash out sold ${result.contracts} contracts, ${result.sold} positions in full and ${result.partly} in part, ${result.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(result.pnlUsd).toFixed(2)} after fees; ${result.kept.length} kept`)
   send('state', supervisor.publicState())
   return { ...result, botsOff: on.length }
@@ -205,6 +207,16 @@ function registerIpc(): void {
     if ((doc as { executionMode?: string })?.executionMode === 'live') {
       terms.require()
       if (settingsStore.account().executionMode !== 'live') confirmNative('Turn off dry run?', 'Live bots that are switched on will send real orders to your venues.', 'Go live')
+    }
+    // The day profit lock sells on its own, so switching it on or changing it
+    // while on is confirmed natively, like going live.
+    const lockNext = AccountSettings.shape.profitLock.safeParse((doc as { profitLock?: unknown })?.profitLock)
+    const lockNow = settingsStore.account().profitLock
+    if (lockNext.success && lockNext.data.enabled && JSON.stringify(lockNext.data) !== JSON.stringify(lockNow)) {
+      const l = lockNext.data
+      confirmNative('Turn on the day profit lock?',
+        `Once the ${l.watch === 'live' ? 'live Kalshi' : 'paper'} day is up ${l.upPct}%${l.trailPct > 0 ? ` and then gives back ${l.trailPct} points from its best` : ''}, the app cashes out on its own: every ${l.watch} bot is switched off${l.watch === 'live' ? ', the kill switch goes on,' : ''} and every open ${l.watch} position is sold at the bid.${l.watch === 'live' ? ' These are real sales that cannot be undone.' : ''}`,
+        'Turn on')
     }
     // Only engine:killSwitch (and its native confirm) moves the kill switch; a
     // saved account document, stale or crafted, keeps whatever is stored.
@@ -348,9 +360,9 @@ app.whenReady().then(async () => {
   // The day profit lock fired: the same cash out as the button, and the user
   // is told even if the window is behind something else.
   supervisor.on('profitLock', (why: string) => {
-    void cashOut(false, `by the day profit lock: ${why}`).then((r) => {
+    void cashOut(false, `by the day profit lock: ${why}`, settingsStore.account().profitLock.watch).then((r) => {
       send('cashOut', { ...r, why })
-      if (Notification.isSupported()) new Notification({ title: 'Lazy Edge cashed out', body: `Day profit lock: ${why}. Sold ${r.contracts} contracts, ${r.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(r.pnlUsd).toFixed(2)} after fees. Every bot is off and the kill switch is on.`.slice(0, 250) }).show()
+      if (Notification.isSupported()) new Notification({ title: 'Lazy Edge cashed out', body: `Day profit lock: ${why}. Sold ${r.contracts} contracts, ${r.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(r.pnlUsd).toFixed(2)} after fees. Its bots are off; switch them back on when you are ready.`.slice(0, 250) }).show()
     }).catch((err) => {
       note(null, `Day profit lock could not cash out: ${(err as Error).message}`)
       if (Notification.isSupported()) new Notification({ title: 'Lazy Edge profit lock', body: `It fired but could not cash out: ${(err as Error).message}`.slice(0, 250) }).show()

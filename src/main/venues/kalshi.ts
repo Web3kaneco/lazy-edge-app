@@ -312,10 +312,20 @@ export class KalshiVenue implements Venue {
     }
   }
 
+  // Every page of the market's orders, so a busy market cannot hide the one
+  // we sent. A list that cannot be read to the end throws: unknown, never
+  // absent, so the caller never sends the sell again on a guess.
   async findOrder(contract: string, clientOrderId: string): Promise<string | null> {
-    const list = await this.authed<{ orders?: Record<string, any>[] }>('GET', '/portfolio/orders', undefined, `?ticker=${encodeURIComponent(contract)}&limit=200`)
-    const o = (list.orders ?? []).find((x) => x.client_order_id === clientOrderId)
-    return o?.order_id ? String(o.order_id) : null
+    let cursor = ''
+    for (let page = 0; page < 50; page++) {
+      const list = await this.authed<{ orders?: Record<string, any>[]; cursor?: string }>('GET', '/portfolio/orders', undefined,
+        `?ticker=${encodeURIComponent(contract)}&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
+      const o = (list.orders ?? []).find((x) => x.client_order_id === clientOrderId)
+      if (o?.order_id) return String(o.order_id)
+      if (!list.cursor || !(list.orders ?? []).length) return null
+      cursor = list.cursor
+    }
+    throw new Error('the order list is too long to search to the end')
   }
 
   // The V2 API has no read by order id, so the order is found in the market's

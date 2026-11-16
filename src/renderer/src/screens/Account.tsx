@@ -52,7 +52,7 @@ export function Account({ account, onSaved, onSignOut }: { account: AccountSetti
         </div>
 
         <div className="section">Day profit lock</div>
-        <p className="small muted">Locks in a good day. Once the day is up your target, the app cashes out on its own: every bot is switched off, the kill switch goes on, and every open position across all bots is sold at the bid. It fires at most once a day, while the engine is running.</p>
+        <p className="small muted">Locks in a good day. Once the day is up your target, the app cashes out on its own. Watching live money, every live bot is switched off, the kill switch goes on and every open live position is sold at the bid. Watching paper, only paper bots and paper positions are touched. It fires at most once a day, while the engine is running, and switching it on asks you to confirm.</p>
         <Toggle on={a.profitLock.enabled} onChange={(v) => set((x) => { x.profitLock.enabled = v })} label="Cash out automatically when the day is up" />
         <div className="grid cols-2" style={{ marginTop: 10 }}>
           <Field label="Watch" hint={a.profitLock.watch === 'live' ? 'Your Kalshi account value, as Kalshi marks it. A deposit or withdrawal during the day moves it too.' : 'Your paper balance, with open positions at their bid.'}>

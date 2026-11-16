@@ -30,7 +30,7 @@ export interface TicketExit {
   prior?: { contracts: number; avgC: number | null; feeUsd: number }
   // The client order id of a sell sent whose outcome is not yet known: written
   // before sending, so a timeout or a crash is looked up, never sent twice.
-  pending?: { clientOrderId: string; timeInForce: 'gtc' | 'ioc' } | null
+  pending?: { clientOrderId: string; timeInForce: 'gtc' | 'ioc'; sentAt?: number } | null
   // The kill switch cancelled the resting sell. Once the venue reports it
   // done, what it sold is kept and the rest waits to be placed again.
   killed?: boolean

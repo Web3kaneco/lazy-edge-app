@@ -757,24 +757,25 @@ export class Supervisor extends EventEmitter {
   // Kalshi sells are immediate or cancel and reduce only, so a sale can never
   // open a position; paper sells only what the real bid offers, as a taker.
   // `onlyInProfit` keeps any position whose bid is not above what was paid.
-  async cashOutAll(onlyInProfit: boolean): Promise<Omit<CashOutResult, 'botsOff'>> {
+  async cashOutAll(onlyInProfit: boolean, scope: 'all' | 'live' | 'paper' = 'all'): Promise<Omit<CashOutResult, 'botsOff'>> {
     // Never alongside a cycle, which could be selling the same position.
     for (let i = 0; this.busy && i < 600; i++) await new Promise((r) => setTimeout(r, 100))
     if (this.busy) throw new Error('The engine is still in the middle of a cycle. Try again in a moment.')
     this.busy = true
     try {
-      return await this.sellEverything(onlyInProfit)
+      return await this.sellEverything(onlyInProfit, scope)
     } finally {
       this.busy = false
     }
   }
 
-  private async sellEverything(onlyInProfit: boolean): Promise<Omit<CashOutResult, 'botsOff'>> {
+  private async sellEverything(onlyInProfit: boolean, scope: 'all' | 'live' | 'paper'): Promise<Omit<CashOutResult, 'botsOff'>> {
     const out: Omit<CashOutResult, 'botsOff'> = { sold: 0, partly: 0, kept: [], contracts: 0, pnlUsd: 0 }
     const keep = (t: Ticket, why: string): void => { out.kept.push({ title: t.title, why }) }
     const kalshi = this.venues.kalshi
     for (const t of ledger.active(2)) {
       if (!isOpen(t) || t.status === 'dry_run' || t.filledContracts < 1 || t.avgFillC === null) continue
+      if ((scope === 'live' && t.venue === 'paper') || (scope === 'paper' && t.venue !== 'paper')) continue
       if (t.priceSource !== 'kalshi' || (t.venue !== 'paper' && t.venue !== 'kalshi')) { keep(t, `${t.venue} positions cannot be sold from the app yet`); continue }
       try {
         let exit: TicketExit = t.exit ?? { ...newExit('mark', t.avgFillC, 0), status: 'waiting' }
@@ -800,7 +801,7 @@ export class Supervisor extends EventEmitter {
           fill = { contracts: n, priceC: bid.bidC, feeUsd: exitFee(bid.bidC, n, true) }
         } else {
           const clientOrderId = `${t.id.slice(0, 36)}-c${Date.now().toString(36)}`
-          this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'ioc' }, cashout: true } })
+          this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'ioc', sentAt: Date.now() }, cashout: true } })
           const res = await kalshi.sell!({ contract: t.contract, side: t.side, contracts: held, priceC: bid.bidC, timeInForce: 'ioc', clientOrderId })
           if (!res.ok) {
             if (res.retryable) { keep(t, `the sell was not confirmed (${res.error}); it is checked on the next cycle`); continue }
@@ -854,6 +855,8 @@ export class Supervisor extends EventEmitter {
     if (exit.pending) {
       const p = exit.pending
       const id = await venue.findOrder(t.contract, p.clientOrderId)
+      // Just sent and not listed yet: unknown, not absent. Look again later.
+      if (!id && p.sentAt && Date.now() - p.sentAt < 60_000) return
       if (!id) {
         // It never reached the book. Clear it and carry on as before.
         exit = { ...exit, pending: null }
@@ -879,7 +882,7 @@ export class Supervisor extends EventEmitter {
       if (exit.status === 'waiting') {
         if (killed()) return
         const clientOrderId = `${t.id.slice(0, 36)}-x${Date.now().toString(36)}`
-        this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'gtc' } } })
+        this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'gtc', sentAt: Date.now() } } })
         const res = await venue.sell({ contract: t.contract, side: t.side, contracts: held, priceC: exit.targetC, timeInForce: 'gtc', clientOrderId })
         if (!res.ok) {
           // A timeout or a server error may have landed: it stays pending and is looked up next cycle.
@@ -912,7 +915,7 @@ export class Supervisor extends EventEmitter {
     const bid = await this.bidFor(t)
     if (!bid || bid.bidC < exit.targetC || killed()) return
     const clientOrderId = `${t.id.slice(0, 36)}-m${Date.now().toString(36)}`
-    this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'ioc' } } })
+    this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'ioc', sentAt: Date.now() } } })
     const res = await venue.sell({ contract: t.contract, side: t.side, contracts: held, priceC: bid.bidC, timeInForce: 'ioc', clientOrderId })
     if (!res.ok) {
       if (res.retryable) return this.log(t.botId, t.botName, t.title, 'exit_retry', `mark sell not confirmed: ${res.error}`)
