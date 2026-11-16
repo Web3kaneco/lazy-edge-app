@@ -54,6 +54,7 @@ export function Dashboard({ engine, onSendDay }: { engine: EngineState | null; o
           <h2>Today's profit</h2>
           <div className={`stat ${pnl((v) => v !== 'paper') < 0 ? 'bad' : ''}`}>{usd(pnl((v) => v !== 'paper'))}</div>
           <div className="stat-label has-tip" data-tip="The trading day runs from 4 AM to 4 AM your time, so a late game counts with the night it started.">real money, settled since 4 AM · paper {usd(pnl((v) => v === 'paper'))} · {open.length} trades still open</div>
+          {engine?.profitLock && <LockLine lock={engine.profitLock} account={account} />}
           <button className="btn" style={{ marginTop: 10 }} onClick={onSendDay} title="Send a day of trades to the Lazy Edge team so they can look at it with you and suggest changes to your bots.">Send a day to the team</button>
         </div>
       </div>
@@ -113,6 +114,20 @@ function InPlay({ limits: l, account, bots }: { limits: EngineState['limits']; a
       ) : (
         <p className="small muted" style={{ margin: '10px 0 0' }}>No limit has held a play back today.</p>
       )}
+    </div>
+  )
+}
+
+// Where the day stands against the day profit lock.
+function LockLine({ lock, account }: { lock: EngineState['profitLock']; account: AccountSettings | null }) {
+  const cfg = account?.profitLock
+  const pct = (n: number): string => `${n >= 0 ? '+' : '−'}${Math.abs(n).toFixed(1)}%`
+  const what = lock.watch === 'live' ? 'live money' : 'paper'
+  if (!lock.enabled || !cfg) return <div className="stat-label" style={{ marginTop: 6 }}>Day profit lock is off. Set it on the Account screen.</div>
+  if (lock.firedAt) return <div className="stat-label good" style={{ marginTop: 6 }}>Day profit lock cashed out {what} at {new Date(lock.firedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}, with the day's best at {pct(lock.highPct)}.</div>
+  return (
+    <div className="stat-label has-tip" style={{ marginTop: 6 }} data-tip="Day so far against the account value at the day's first reading, with open positions at what they could be sold for. Checked every 30 seconds while the engine runs.">
+      Day profit lock on {what}: {lock.nowPct === null ? 'waiting for a reading' : `${pct(lock.nowPct)} now, best ${pct(lock.highPct)}`} · cashes out {cfg.trailPct > 0 ? `on a ${cfg.trailPct} point give back once up ${cfg.upPct}%` : `at ${cfg.upPct}%`}
     </div>
   )
 }

@@ -5,7 +5,7 @@
 // express is listed back as unsupported rather than silently dropped.
 import { z } from 'zod'
 import { defaultBot, RULESET_VERSION } from '@shared/ruleset'
-import { BotSettings, Lane, Phase, Sport, TradeableLabel, VenueId } from '@shared/schema'
+import { BotSettings, ExitMode, Lane, Phase, Quarter, Sport, TradeableLabel, VenueId } from '@shared/schema'
 import type { AiProvider } from './types'
 
 const Draft = z.object({
@@ -13,9 +13,17 @@ const Draft = z.object({
   sports: z.array(Sport),
   lanes: z.array(Lane),
   phase: Phase,
+  quarters: z.array(Quarter),
   labels: z.array(TradeableLabel),
   venues: z.array(VenueId),
   minEdgePp: z.number(),
+  minChancePregamePct: z.number(),
+  minChanceQ1Pct: z.number(),
+  minChanceQ2Pct: z.number(),
+  minChanceQ3Pct: z.number(),
+  minChanceQ4Pct: z.number(),
+  exitMode: ExitMode,
+  exitTargetC: z.number(),
   minEvCents: z.number(),
   priceBandLowC: z.number(),
   priceBandHighC: z.number(),
@@ -79,6 +87,7 @@ export async function draftStrategy(provider: AiProvider, sentence: string, guid
     sports: d.sports.length ? d.sports : base.market.sports,
     lanes: d.lanes.length ? d.lanes : base.market.lanes,
     phase: d.phase,
+    quarters: d.quarters.length ? d.quarters : base.market.quarters,
     labels: d.labels.length ? d.labels : base.market.labels,
     venues: d.venues.length ? d.venues : base.market.venues
   }
@@ -89,8 +98,10 @@ export async function draftStrategy(provider: AiProvider, sentence: string, guid
     priceBandC: [Math.round(d.priceBandLowC), Math.round(d.priceBandHighC)],
     maxPriceAgeS: Math.round(d.maxPriceAgeS),
     requireTrigger: d.requireTrigger,
-    measuredOnly: d.measuredOnly
+    measuredOnly: d.measuredOnly,
+    minChancePct: { pregame: d.minChancePregamePct, Q1: d.minChanceQ1Pct, Q2: d.minChanceQ2Pct, Q3: d.minChanceQ3Pct, Q4: d.minChanceQ4Pct }
   }
+  bot.exit = { mode: d.exitMode, targetC: Math.round(d.exitTargetC) }
   bot.size = {
     ...base.size,
     kellyMultiplier: d.kellyMultiplier,

@@ -40,6 +40,9 @@ export const lazyedge = {
   mlbEdges: () => api<any>('/v1/mlb/edges'),
   mlbLive: () => api<any>('/v1/mlb/live'),
   nbaLive: () => api<any>('/v1/edges/live'),
+  // Points, rebounds and assists for every game on the slate, with the chance
+  // of the over pregame and live, the Kalshi contract and its live price.
+  nbaProps: () => api<any>('/v1/nba/props'),
   nbaSpreadLadder: (gameId: string) => api<any>(`/v1/spread-ladder/${encodeURIComponent(gameId)}`, { venue: 'kalshi' }),
   wcEdges: () => api<any>('/v1/wc/edges')
 }

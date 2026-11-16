@@ -15,7 +15,7 @@ Then:
 
 1. **Run it.** Windows warns that the publisher is unknown, because the beta is not code signed yet. Choose **More info**, then **Run anyway**.
 2. **Accept the terms** and **sign in** to your Lazy Edge account (email code or wallet). The app gets its own Lazy Edge key for you; you never copy one.
-3. **Switch on a bot.** Eight starter bots are already in your list, switched off and trading practice money. Switch one on and press Start engine.
+3. **Switch on a bot.** Ten starter bots are already in your list, switched off and trading practice money. Switch one on and press Start engine.
 4. **Optional:** to trade real money or use an AI, paste your exchange or AI keys on the app's **Keys** screen. They are encrypted by Windows and never leave your computer except to the venue or provider they belong to.
 
 You need a Lazy Edge account with API access (a paid plan, or 5 or more Lazy Lions in a linked wallet). The full guide, including where your data lives, updating and uninstalling, is in [docs/INSTALL.md](docs/INSTALL.md).

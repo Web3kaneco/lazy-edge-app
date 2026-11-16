@@ -27,7 +27,9 @@ export const DEFAULT_ACCOUNT: AccountSettings = {
     polymarket: { enabled: false, accountType: 'email' }
   },
   accountDailyDrawdownUsd: 50, // the server engine's UserConfig default
-  accountMaxOpenExposureUsd: 200
+  accountMaxOpenExposureUsd: 200,
+  // Off until the user sets it: up 20%, then cash out on a 5 point give back.
+  profitLock: { enabled: false, watch: 'live', upPct: 20, trailPct: 5 }
 }
 
 export function defaultBot(id: string, name: string): BotSettings {
@@ -41,6 +43,7 @@ export function defaultBot(id: string, name: string): BotSettings {
       sports: ['NBA', 'NFL'], // NBA is the core product
       lanes: ['MONEYLINE', 'SPREAD', 'TOTAL'],
       phase: 'both',
+      quarters: ['Q1', 'Q2', 'Q3', 'Q4'],
       labels: ['PRICE_GAP', 'MEASURED'],
       venues: ['paper']
     },
@@ -51,7 +54,8 @@ export function defaultBot(id: string, name: string): BotSettings {
       priceBandC: [25, 75], // the hot plays work
       maxPriceAgeS: 180, // the API's own freshness rule
       requireTrigger: false,
-      measuredOnly: false
+      measuredOnly: false,
+      minChancePct: { pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 }
     },
     size: {
       kellyMultiplier: 0.25, // the strategy plan's kelly_fraction default
@@ -61,6 +65,8 @@ export function defaultBot(id: string, name: string): BotSettings {
       maxContracts: 100,
       maxGameEquityPct: 0.35 // MLB_MAX_GAME_EQUITY_PCT, the 255 contract weeks
     },
+    // Held to settlement until the user picks an exit; +10c is John's scalp.
+    exit: { mode: 'hold', targetC: 10 },
     guards: {
       noEntryFinalS: 90, // the overtime wipeout
       noOvertime: true,

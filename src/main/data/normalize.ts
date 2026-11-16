@@ -438,3 +438,64 @@ export function nbaSpreadLadder(liveRow: any, rungs: any, now: number): Normaliz
   }
   return out
 }
+
+// NBA player props, from NbaPropsGame (/v1/nba/props): one row per player,
+// with points, rebounds and assists side by side. Each stat carries its
+// Kalshi contract ({stat}_market_id), the line, and our chance of the over:
+// the simulation's before the tip ({stat}_sim_p_over) and the live model's in
+// play (likelihood_over, reb_likelihood_over, ast_likelihood_over). YES on a
+// prop contract is the over, so the under is its NO side.
+//
+// One signal per player and stat, on whichever side we give the better
+// chance, so a bot never sees both sides of one prop at once. A player listed
+// out is skipped. A stat with no Kalshi contract or no chance is refused, so
+// the gap shows instead of trading nothing quietly.
+const PROP_STATS = [
+  { label: 'points', pre: '', key: 'pts', now: 'current_points' },
+  { label: 'rebounds', pre: 'reb_', key: 'reb', now: 'current_rebounds' },
+  { label: 'assists', pre: 'ast_', key: 'ast', now: 'current_assists' }
+] as const
+
+export function nbaProps(body: unknown, now: number): Normalized {
+  const out: Normalized = { signals: [], refused: [] }
+  for (const g of Array.isArray(body) ? body : []) {
+    const gid = String(g?.game_id ?? '')
+    if (!gid) continue
+    const clock = g.is_pregame === false ? parseNbaClock(g.clock, g.period) : null
+    const live = g.is_pregame === false
+    const matchup = matchupOf(g)
+    for (const p of Array.isArray(g.players) ? g.players : []) {
+      if (/\bOUT\b|INACTIVE/i.test(String(p?.availability ?? ''))) continue
+      const name = String(p?.player_name ?? '').trim()
+      if (!name) continue
+      for (const s of PROP_STATS) {
+        const line = num(p[`${s.pre}market_line`])
+        if (line === null) continue
+        const ticker = p[`${s.key}_market_id`] ? String(p[`${s.key}_market_id`]) : ''
+        if (String(p[`${s.key}_venue`] ?? '').toLowerCase() !== 'kalshi' || !ticker) { out.refused.push({ source: 'nba.props', reason: 'no Kalshi contract' }); continue }
+        const pOver = num(live ? p[`${s.pre}likelihood_over`] : p[`${s.key}_sim_p_over`])
+        if (pOver === null || pOver <= 0 || pOver >= 1) { out.refused.push({ source: 'nba.props', reason: 'no chance of the over' }); continue }
+        const over = pOver >= 0.5
+        const price = num(p[`${s.key}_live_price`])
+        const edge = num(p[`${s.key}_live_edge_pp`])
+        const sofar = live ? num(p[s.now]) : null
+        const ourP = over ? pOver : 1 - pOver
+        out.signals.push({
+          key: `nba:${gid}:PROP:${ticker}`, sport: 'NBA', lane: 'PROP',
+          phase: live ? 'live' : 'pregame', gameId: gid,
+          title: `${matchup ?? ''} ${name} ${over ? 'over' : 'under'} ${line} ${s.label}`.trim(),
+          signalType: over ? 'BUY_OVER' : 'BUY_UNDER', explicitSide: over ? 'yes' : 'no',
+          ourP,
+          marketP: price === null ? null : over ? price : 1 - price,
+          // The live edge is ours minus the mid on the over; the under is its mirror.
+          edgePp: edge === null ? null : over ? edge : -edge,
+          label: 'PRICE_GAP', kelly: null, trigger: false, measured: false, clock,
+          quotes: [{ venue: 'kalshi', contract: ticker, side: over ? 'yes' : 'no', ask: null, askSize: null, priceAgeS: null }],
+          why: `${Math.round(ourP * 100)}% to go ${over ? 'over' : 'under'} ${line}${sofar !== null ? `, ${sofar} so far` : ''}`,
+          receivedAt: now, matchup
+        })
+      }
+    }
+  }
+  return out
+}

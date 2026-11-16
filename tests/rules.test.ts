@@ -292,3 +292,47 @@ describe('never bets against itself, 2026-11-14', () => {
     expect(BotSettings.parse(old).guards.noOpposingBets).toBe(true)
   })
 })
+
+describe('quarters and the chance to hit, 2026-11-16', () => {
+  const live = (period: number, ourP = 0.74): Signal => signal({
+    phase: 'live', sport: 'NBA', ourP, edgePp: 10,
+    clock: { period, secondsRemaining: (4 - Math.min(period, 4)) * 720 + 300, overtime: period > 4 }
+  })
+
+  it('trades in game plays only in the quarters ticked', () => {
+    const b = bot((x) => { x.market.quarters = ['Q2', 'Q3', 'Q4'] })
+    expect(evaluate(live(1), b, account(), ctx())).toMatchObject({ kind: 'skip', gate: 'quarter_not_enabled', detail: 'Q1' })
+    expect(evaluate(live(2), b, account(), ctx()).kind).toBe('trade')
+  })
+
+  it('refuses a live play whose quarter cannot be read, and leaves overtime to its own guard', () => {
+    const b = bot((x) => { x.guards.noOvertime = false; x.guards.noEntryFinalS = 0; x.market.quarters = ['Q4'] })
+    expect(evaluate(signal({ phase: 'live', clock: { period: null, secondsRemaining: 300, overtime: false } }), b, account(), ctx())).toMatchObject({ gate: 'quarter_unknown' })
+    expect(evaluate(live(5), b, account(), ctx()).kind).toBe('trade')
+  })
+
+  it('holds each quarter to its own minimum chance, overtime to the fourth', () => {
+    const b = bot((x) => { x.guards.noOvertime = false; x.guards.noEntryFinalS = 0; x.entry.minChancePct = { pregame: 70, Q1: 70, Q2: 72, Q3: 75, Q4: 80 } })
+    expect(evaluate(live(2), b, account(), ctx()).kind).toBe('trade')
+    expect(evaluate(live(4), b, account(), ctx())).toMatchObject({ gate: 'min_chance', detail: '74.0% < 80%' })
+    expect(evaluate(live(5), b, account(), ctx())).toMatchObject({ gate: 'min_chance' })
+    expect(evaluate(signal({ ourP: 0.6 }), b, account(), ctx())).toMatchObject({ gate: 'min_chance', detail: '60.0% < 70%' })
+  })
+
+  it('reads bots saved before 0.6.0 as every quarter, no minimum and hold', async () => {
+    const { BotSettings } = await import('@shared/schema')
+    const old: Record<string, any> = structuredClone(defaultBot('old', 'old'))
+    delete old.market.quarters; delete old.entry.minChancePct; delete old.exit
+    const b = BotSettings.parse(old)
+    expect(b.market.quarters).toEqual(['Q1', 'Q2', 'Q3', 'Q4'])
+    expect(b.entry.minChancePct).toEqual({ pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 })
+    expect(b.exit).toEqual({ mode: 'hold', targetC: 10 })
+  })
+
+  it('gives a second entry on the same play its own order id', () => {
+    const b = bot()
+    const first = evaluate(signal(), b, account(), ctx())
+    const again = evaluate(signal(), b, account(), ctx({ entriesToday: 1 }))
+    expect(first.kind === 'trade' && again.kind === 'trade' && first.idempotencyKey !== again.idempotencyKey).toBe(true)
+  })
+})

@@ -35,7 +35,7 @@ This is expected for an unsigned beta and does not by itself mean the file is ha
 1. **Windows SmartScreen warning.** Choose **More info**, then **Run anyway**. If your browser blocks the download, choose to keep it.
 2. **Terms.** Read the terms of use and risk, tick each acknowledgement, and choose I agree. A new version of the terms asks again.
 3. **Sign in** to Lazy Edge by email code or wallet. The app issues its own Lazy Edge key for this computer.
-4. **Bots.** Eight starter bots are already in your list, switched off and in paper. Switch one on and start the engine to watch it trade practice money.
+4. **Bots.** Ten starter bots are already in your list, switched off and in paper. Switch one on and start the engine to watch it trade practice money.
 5. **Keys** (optional). Add your exchange or AI keys on the Keys screen. They are encrypted by Windows and never leave your computer except to the venue or provider they belong to.
 
 Live trading stays in dry run until you turn dry run off on the Account screen, and every live bot asks for confirmation before it is switched on.

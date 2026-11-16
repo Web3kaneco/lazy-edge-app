@@ -8,6 +8,12 @@ export const Sport = z.enum(['NFL', 'MLB', 'NBA', 'WC'])
 // graded, so it is never enabled by default.
 export const Lane = z.enum(['MONEYLINE', 'SPREAD', 'TOTAL', 'TEAM_TOTAL', 'PROP'])
 export const Phase = z.enum(['pregame', 'live', 'both'])
+export const Quarter = z.enum(['Q1', 'Q2', 'Q3', 'Q4'])
+// hold: keep to settlement. limit: rest a sell at entry + target cents the
+// moment the entry fills. mark: watch the book and sell at the bid once it
+// reaches entry + target.
+export const ExitMode = z.enum(['hold', 'limit', 'mark'])
+const chance = z.number().min(0).max(99)
 export const VenueId = z.enum(['paper', 'kalshi', 'polymarket'])
 export const ProviderId = z.enum(['anthropic', 'openai', 'xai', 'ollama'])
 
@@ -37,7 +43,16 @@ export const AccountSettings = z.object({
   // The account cap above every bot (decision 12): the bots together cannot
   // lose more than this today, however many are switched on.
   accountDailyDrawdownUsd: usd,
-  accountMaxOpenExposureUsd: usd
+  accountMaxOpenExposureUsd: usd,
+  // The day profit lock (2026-11-16): once the day is up upPct, cash out
+  // everything, at once (trailPct 0) or once the day gives back trailPct
+  // points from its high. It watches live money or paper, once a day.
+  profitLock: z.object({
+    enabled: z.boolean(),
+    watch: z.enum(['live', 'paper']),
+    upPct: z.number().min(1).max(1000),
+    trailPct: z.number().min(0).max(1000)
+  }).default({ enabled: false, watch: 'live', upPct: 20, trailPct: 5 })
 })
 export type AccountSettings = z.infer<typeof AccountSettings>
 
@@ -62,6 +77,9 @@ export const BotSettings = z.object({
     sports: z.array(Sport).min(1),
     lanes: z.array(Lane).min(1),
     phase: Phase,
+    // In game plays trade only in these quarters, so a bot can start in the
+    // quarter the user picks. Overtime is the No overtime guard's.
+    quarters: z.array(Quarter).min(1).default(['Q1', 'Q2', 'Q3', 'Q4']),
     labels: z.array(TradeableLabel).min(1),
     venues: z.array(VenueId).min(1)
   }),
@@ -80,7 +98,11 @@ export const BotSettings = z.object({
     // be tighter.
     maxPriceAgeS: z.number().int().min(1).max(180),
     requireTrigger: z.boolean(),
-    measuredOnly: z.boolean()
+    measuredOnly: z.boolean(),
+    // The lowest chance, in percent, that the contract bought pays out, before
+    // the game and in each quarter. 0 means no minimum. Overtime uses Q4's.
+    minChancePct: z.object({ pregame: chance, Q1: chance, Q2: chance, Q3: chance, Q4: chance })
+      .default({ pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 })
   }),
 
   size: z.object({
@@ -95,9 +117,14 @@ export const BotSettings = z.object({
     maxGameEquityPct: pct
   }),
 
-  // No exit settings in phase one: every position is held to settlement. A
-  // take profit field the engine did not act on would be a protection the
-  // user believes in and does not have.
+  // How a position is closed (2026-11-16). The engine acts on every mode; a
+  // position whose exit never fills is held to settlement. Bots saved before
+  // 0.6.0 hold.
+  exit: z.object({
+    mode: ExitMode,
+    // Cents above the entry price to sell at.
+    targetC: z.number().int().min(1).max(50)
+  }).default({ mode: 'hold', targetC: 10 }),
 
   guards: z.object({
     noEntryFinalS: z.number().int().min(0).max(900),
@@ -117,5 +144,7 @@ export type BotSettings = z.infer<typeof BotSettings>
 
 export type Sport = z.infer<typeof Sport>
 export type Lane = z.infer<typeof Lane>
+export type Quarter = z.infer<typeof Quarter>
+export type ExitMode = z.infer<typeof ExitMode>
 export type VenueId = z.infer<typeof VenueId>
 export type ProviderId = z.infer<typeof ProviderId>

@@ -2,8 +2,13 @@
 // book, run each enabled bot's gates, place, then reconcile fills and
 // settlements against the venue's own record. Runs only while the app is
 // open (decision 14).
+import { app } from 'electron'
 import { EventEmitter } from 'node:events'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { checkLock, dayPct, rollDay, type LockDay, type LockState } from '@shared/profitlock'
 import { tradingDay } from '@shared/day'
+import { addExitFill, bidFromOtherAsk, exitFee, newExit, paperExitFill, positionPnl, withOrderTotals, type CashOutResult, type TicketExit } from '@shared/exits'
 import { isLimitGate, type HeldBack, type LimitGate } from '@shared/limits'
 import { rulesOf } from '@shared/review'
 import type { AccountSettings, BotSettings, VenueId } from '@shared/schema'
@@ -12,7 +17,7 @@ import { screen, type Candidate } from '../ai/agent'
 import { accuracy } from './accuracy'
 import { ai } from '../ai/registry'
 import { lazyedge, NotSignedInError, PlanInactiveError } from '../data/lazyedge'
-import { matchupOf, mlbEdges, nflBoardPhase, nbaLiveEdges, nbaRowProblem, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, type NflMarketMap, type Normalized } from '../data/normalize'
+import { matchupOf, mlbEdges, nflBoardPhase, nbaLiveEdges, nbaProps, nbaRowProblem, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, type NflMarketMap, type Normalized } from '../data/normalize'
 import { evaluate, preGates, type GateContext, type TradeDecision, type VenueState } from '../rules/gates'
 import type { Position } from '../rules/stance'
 import { isOpen, ledger, type Ticket } from '../store/ledger'
@@ -27,6 +32,18 @@ const BOARD_EVERY_MS = 5 * 60_000 // pregame boards move slowly; live plays are 
 // One spread ladder call per live NBA game; every 30s keeps a full slate well
 // inside the basic tier's 60 requests a minute.
 const NBA_LADDER_EVERY_MS = 30_000
+const NBA_PROPS_EVERY_MS = 30_000
+const LOCK_EVERY_MS = 30_000
+
+// The profit lock's record of the day, kept on disk so a restart keeps the
+// day's start and high.
+const lockFile = (): string => join(app.getPath('userData'), 'profitlock.json')
+function readLockDay(): LockDay | null {
+  try { return existsSync(lockFile()) ? JSON.parse(readFileSync(lockFile(), 'utf8')) as LockDay : null } catch { return null }
+}
+function writeLockDay(d: LockDay): void {
+  try { writeFileSync(lockFile(), JSON.stringify(d)) } catch { /* the next reading writes it again */ }
+}
 const RECONCILE_EVERY_MS = 30_000
 // Book reads run in parallel but are spaced to stay inside Kalshi's basic
 // tier of 20 reads a second, shared with everything else the app reads.
@@ -34,7 +51,7 @@ const REQUOTE_CONCURRENCY = 6
 const REQUOTE_SPACING_MS = 70
 // Gates that only restate a bot's own settings. The Board shows them live;
 // writing one ledger line per spread rung for them was 96% of the ledger.
-const SETTINGS_GATES = new Set(['sport_not_enabled', 'lane_not_enabled', 'phase_not_enabled', 'label_not_enabled', 'label_never_traded', 'not_measured', 'no_trigger'])
+const SETTINGS_GATES = new Set(['sport_not_enabled', 'lane_not_enabled', 'phase_not_enabled', 'label_not_enabled', 'label_never_traded', 'not_measured', 'no_trigger', 'quarter_not_enabled'])
 // A bot is due a little early rather than a whole cycle late when the timer
 // and its Poll every line up.
 const POLL_SLACK_MS = 2000
@@ -88,6 +105,12 @@ export class Supervisor extends EventEmitter {
   // from nfl_market_map, its kickoff and its status.
   private nflMaps: Record<string, NflMarketMap> = {}
   private nbaLadders = new Map<string, { at: number; rungs: unknown }>()
+  private nbaPropsCache: { at: number; body: unknown } | null = null
+  // Ticket id -> settlement passes spent waiting to read an exit's last fills.
+  private settleTries = new Map<string, number>()
+  private lastLockAt = 0
+  private lockDay: LockDay | null = null
+  private lockNowPct: number | null = null
   private skipSeen = new Set<string>()
   private guide = ''
   // One book read per signal per cycle, shared by every bot that looks at it.
@@ -119,9 +142,9 @@ export class Supervisor extends EventEmitter {
 
   // Everything but the board, which is large and only the Board screen needs.
   // The limits are worked out fresh, so a cap saved on Account shows at once.
-  publicState(): Omit<SupervisorState, 'board' | 'verdicts'> & { limits: LimitsState } {
+  publicState(): Omit<SupervisorState, 'board' | 'verdicts'> & { limits: LimitsState; profitLock: LockState } {
     const { board: _b, verdicts: _v, ...rest } = this.state
-    return { ...rest, limits: this.limits() }
+    return { ...rest, limits: this.limits(), profitLock: this.lockState() }
   }
 
   private limits(): LimitsState {
@@ -196,10 +219,28 @@ export class Supervisor extends EventEmitter {
     settingsStore.saveAccount({ ...account, killSwitch: on })
     if (!on) return this.emitState()
     for (const t of ledger.active(2)) {
+      // A resting exit is an open order too. Once Kalshi reports it done, what
+      // it sold is kept and the rest is placed again after the release.
+      if (t.venue !== 'paper' && t.exit?.status === 'resting' && t.exit.orderId) {
+        try {
+          await this.venues[t.venue].cancel(t.exit.orderId, t.contract)
+          // It stays tracked until Kalshi reports it done, so whatever it sold
+          // before the cancel is read from Kalshi, never guessed.
+          const exit: TicketExit = { ...t.exit, killed: true }
+          this.update(t, { exit })
+          Object.assign(t, { exit })
+        } catch (err) {
+          this.log(t.botId, t.botName, t.title, 'cancel_failed', (err as Error).message)
+        }
+      }
       if ((t.status !== 'resting' && t.status !== 'partial') || !t.venueOrderId || t.venue === 'paper') continue
       try {
         await this.venues[t.venue].cancel(t.venueOrderId, t.contract)
-        this.update(t, { status: t.filledContracts > 0 ? 'partial' : 'cancelled', venueOrderId: null, costUsd: filledCost(t.filledContracts, t.avgFillC, t.limitPriceC) })
+        // Its final fills, so the position held is known exactly.
+        const u = await this.venues[t.venue].status(t.venueOrderId, { contract: t.contract, side: t.side }).catch(() => null)
+        const filled = u ? u.filledContracts : t.filledContracts
+        const avgFillC = u?.avgFillC ?? t.avgFillC
+        this.update(t, { status: filled > 0 ? 'partial' : 'cancelled', venueOrderId: null, filledContracts: filled, avgFillC, feeUsd: u?.feeUsd ?? t.feeUsd, costUsd: filledCost(filled, avgFillC, t.limitPriceC) })
       } catch (err) {
         this.log(t.botId, t.botName, t.title, 'cancel_failed', (err as Error).message)
       }
@@ -252,6 +293,9 @@ export class Supervisor extends EventEmitter {
       this.state.board = feed.signals.slice(0, 3000).map((s) => this.requoted.get(s.key) ?? s)
       this.state.verdicts = this.verdicts
 
+      // Exits every cycle, so a mark exit sells while the bid is still there.
+      await this.manageExits()
+      await this.checkProfitLock()
       if (Date.now() - this.lastReconcileAt > RECONCILE_EVERY_MS) {
         this.lastReconcileAt = Date.now()
         await this.reconcile()
@@ -330,6 +374,18 @@ export class Supervisor extends EventEmitter {
         }
         add(nbaSpreadLadder(row, cached.rungs, now))
       }
+    }
+    // Player props only load for a bot that trades the props lane: the slate
+    // is several hundred rows, cached for 30s.
+    if (sports.has('NBA') && bots.some((b) => b.market.sports.includes('NBA') && b.market.lanes.includes('PROP'))) {
+      if (!this.nbaPropsCache || now - this.nbaPropsCache.at > NBA_PROPS_EVERY_MS) {
+        try {
+          this.nbaPropsCache = { at: now, body: await lazyedge.nbaProps() }
+        } catch (err) {
+          out.refused.push({ source: 'nba.props', reason: (err as Error).message.slice(0, 80) })
+        }
+      }
+      if (this.nbaPropsCache) add(nbaProps(this.nbaPropsCache.body, this.nbaPropsCache.at))
     }
     if (sports.has('WC')) {
       // Not wired yet: shown as refused so the gap is visible rather than
@@ -498,7 +554,10 @@ export class Supervisor extends EventEmitter {
       botDailyPnlUsd: realised(todays(mine)),
       accountDailyPnlUsd: realised(todays(all.filter((t) => t.venue !== 'paper'))),
       // A paper order the book could not fill was never a trade.
-      botTradesToday: todays(mine).filter((t) => t.status !== 'rejected' && !(t.status === 'cancelled' && t.filledContracts === 0)).length
+      botTradesToday: todays(mine).filter((t) => t.status !== 'rejected' && !(t.status === 'cancelled' && t.filledContracts === 0)).length,
+      // Only entries that held contracts: an order whose answer was lost keeps
+      // its key, so Kalshi still refuses it as a duplicate.
+      entriesToday: todays(mine).filter((t) => t.signalKey === signal.key && t.filledContracts > 0).length
     }
   }
 
@@ -528,7 +587,12 @@ export class Supervisor extends EventEmitter {
       audit: [...d.audit, `ev ${d.evCents.toFixed(2)}c, breakeven ${(d.breakeven * 100).toFixed(1)}%, calibrated p ${(d.pCalibrated * 100).toFixed(1)}%`, ...(res.evidence ? [res.evidence] : [])],
       error: res.error,
       play: playTags(signal),
-      rules: rulesOf(bot)
+      rules: rulesOf(bot),
+      // A dry run and a book that never filled hold nothing to sell. Kalshi,
+      // and paper priced off Kalshi, can sell; anything else holds to settlement.
+      exit: bot.exit.mode !== 'hold' && !d.dryRun && res.ok && res.status !== 'cancelled' && res.status !== 'rejected' && d.priceSource === 'kalshi' && (d.venue === 'paper' || d.venue === 'kalshi')
+        ? newExit(bot.exit.mode, res.avgFillC ?? d.limitPriceC, bot.exit.targetC)
+        : null
     }
     ledger.append({ type: 'ticket', ticket })
     // The kill switch pressed while the order was in flight: pull what rests.
@@ -576,15 +640,296 @@ export class Supervisor extends EventEmitter {
           const source = this.venues[t.venue === 'paper' ? t.priceSource : t.venue]
           const result = source.settlement ? await source.settlement(t.contract) : null
           if (result) {
-            const px = t.avgFillC / 100
-            const gross = result === t.side ? t.filledContracts * (1 - px) : -t.filledContracts * px
-            this.update(t, { status: 'settled', pnlUsd: Math.round((gross - t.feeUsd) * 100) / 100 })
+            let ex = t.exit ?? null
+            if (ex && t.venue !== 'paper' && (ex.pending || (ex.status === 'resting' && ex.orderId))) {
+              // A sell whose outcome is unknown is found first, by manageExits,
+              // and a resting sell's last fills are read before closing. Kalshi
+              // may stop listing an old order, so after ten tries the ticket
+              // settles on the last totals it reported, and says so.
+              const tries = (this.settleTries.get(t.id) ?? 0) + 1
+              this.settleTries.set(t.id, tries)
+              const u = !ex.pending && ex.orderId ? await venue.status(ex.orderId, { contract: t.contract, side: t.side }).catch(() => null) : null
+              if (u) ex = withOrderTotals(ex, { contracts: u.filledContracts, avgC: u.avgFillC, feeUsd: u.feeUsd })
+              else if (tries < 10) continue
+              else this.log(t.botId, t.botName, t.title, 'exit_unconfirmed', 'the market settled before the last exit fills could be read; settled on the last totals Kalshi reported')
+              ex = { ...ex, pending: null }
+            }
+            this.settleTries.delete(t.id)
+            // Whatever an exit did not sell settles; a resting exit closes with the market.
+            const exit = ex && ex.status !== 'done' ? { ...ex, status: 'done' as const, orderId: null } : ex
+            this.update(t, { status: 'settled', pnlUsd: positionPnl({ ...t, exit }, result), exit })
           }
         }
       } catch (err) {
         this.log(t.botId, t.botName, t.title, 'reconcile_failed', (err as Error).message.slice(0, 160))
       }
     }
+  }
+
+  // ── Exits ────────────────────────────────────────────────────────────
+
+  // Every open position with an exit still to do. Paper is judged against the
+  // live book on the venue it was priced off. Kalshi gets a real sell: a
+  // resting limit the moment the entry is done, or an immediate or cancel
+  // sell at the bid once the bid reaches the target. Nothing is sent while
+  // the kill switch is on. Once everything held has sold, the ticket closes
+  // and the market is free for the bot to trade again, either side.
+  private async manageExits(): Promise<void> {
+    const killed = settingsStore.account().killSwitch
+    for (const t of ledger.active(2)) {
+      const exit = t.exit
+      if (!exit || exit.status === 'done' || exit.status === 'failed' || !isOpen(t) || t.avgFillC === null) continue
+      // A live entry still on the book has not finished filling: wait for it to
+      // fill or for its own expiry, plus the reconcile backstop.
+      if (t.status === 'resting') continue
+      if (t.status === 'partial' && t.venue !== 'paper') {
+        const bot = settingsStore.bots().find((b) => b.id === t.botId)
+        if (Date.now() - t.createdAt < ((bot?.guards.autoCancelS ?? 3600) + 60) * 1000) continue
+      }
+      const held = t.filledContracts - exit.filledContracts
+      if (held < 1 && !exit.pending) { this.recordExit(t, exit, 'everything held has sold'); continue }
+      // Cashed out by hand: only an unconfirmed sell is still looked up.
+      if (exit.cashout && !exit.pending) continue
+      try {
+        if (t.venue === 'paper') await this.paperExit(t, exit, held)
+        // Under the kill switch only the read only lookup of a pending sell runs.
+        else if (t.venue === 'kalshi' && (!killed || exit.pending)) await this.kalshiExit(t, exit, held)
+      } catch (err) {
+        this.log(t.botId, t.botName, t.title, 'exit_failed', (err as Error).message.slice(0, 160))
+      }
+    }
+  }
+
+  // ── Day profit lock ──────────────────────────────────────────────────
+
+  // Reads the day every 30 seconds while the engine runs. Live money is the
+  // Kalshi account value, which Kalshi marks itself; paper is the paper
+  // balance plus each open position at its bid. When the lock fires, the
+  // index runs the same cash out as the button.
+  private async checkProfitLock(): Promise<void> {
+    if (Date.now() - this.lastLockAt < LOCK_EVERY_MS) return
+    this.lastLockAt = Date.now()
+    const lock = settingsStore.account().profitLock
+    const value = lock.watch === 'live' ? this.state.venues.kalshi?.equityUsd ?? null : await this.paperMarked()
+    if (value === null || value <= 0) { this.lockNowPct = null; return }
+    const prev = this.lockDay ?? readLockDay()
+    const start = rollDay(prev, today(), lock.watch, value)
+    const { day, fire } = checkLock(lock, start, value)
+    this.lockNowPct = dayPct(day, value)
+    if (fire) day.firedAt = Date.now()
+    if (JSON.stringify(day) !== JSON.stringify(prev)) writeLockDay(day)
+    this.lockDay = day
+    if (fire) this.emit('profitLock', fire)
+  }
+
+  // The paper balance plus every open paper position at what it could be sold
+  // for now. A position with no bid counts at what it cost.
+  private async paperMarked(): Promise<number | null> {
+    const { balanceUsd } = this.paperState()
+    if (balanceUsd === null) return null
+    let marked = 0
+    for (const t of ledger.active(2)) {
+      if (t.venue !== 'paper' || !isOpen(t) || t.filledContracts < 1) continue
+      const held = t.filledContracts - (t.exit?.filledContracts ?? 0)
+      const bid = await this.bidFor(t).catch(() => null)
+      marked += bid ? (held * bid.bidC) / 100 : t.costUsd + t.feeUsd
+    }
+    return balanceUsd + marked
+  }
+
+  lockState(): LockState {
+    const lock = settingsStore.account().profitLock
+    const d = this.lockDay ?? readLockDay() ?? { day: today(), watch: lock.watch, startUsd: 0, highPct: 0, firedAt: null }
+    const current = d.day === today() && d.watch === lock.watch
+    return {
+      ...(current ? d : { day: today(), watch: lock.watch, startUsd: 0, highPct: 0, firedAt: null }),
+      enabled: lock.enabled,
+      nowPct: current ? this.lockNowPct : null,
+      armed: lock.enabled && !(current && d.firedAt)
+    }
+  }
+
+  // ── Cash out ─────────────────────────────────────────────────────────
+
+  // Every open position across every bot, sold now at the bid: the user's
+  // "lock it in" button. The caller has already switched every bot off and
+  // the kill switch on, so nothing re-enters and nothing rests on the book.
+  // Kalshi sells are immediate or cancel and reduce only, so a sale can never
+  // open a position; paper sells only what the real bid offers, as a taker.
+  // `onlyInProfit` keeps any position whose bid is not above what was paid.
+  async cashOutAll(onlyInProfit: boolean): Promise<Omit<CashOutResult, 'botsOff'>> {
+    // Never alongside a cycle, which could be selling the same position.
+    for (let i = 0; this.busy && i < 600; i++) await new Promise((r) => setTimeout(r, 100))
+    if (this.busy) throw new Error('The engine is still in the middle of a cycle. Try again in a moment.')
+    this.busy = true
+    try {
+      return await this.sellEverything(onlyInProfit)
+    } finally {
+      this.busy = false
+    }
+  }
+
+  private async sellEverything(onlyInProfit: boolean): Promise<Omit<CashOutResult, 'botsOff'>> {
+    const out: Omit<CashOutResult, 'botsOff'> = { sold: 0, partly: 0, kept: [], contracts: 0, pnlUsd: 0 }
+    const keep = (t: Ticket, why: string): void => { out.kept.push({ title: t.title, why }) }
+    const kalshi = this.venues.kalshi
+    for (const t of ledger.active(2)) {
+      if (!isOpen(t) || t.status === 'dry_run' || t.filledContracts < 1 || t.avgFillC === null) continue
+      if (t.priceSource !== 'kalshi' || (t.venue !== 'paper' && t.venue !== 'kalshi')) { keep(t, `${t.venue} positions cannot be sold from the app yet`); continue }
+      try {
+        let exit: TicketExit = t.exit ?? { ...newExit('mark', t.avgFillC, 0), status: 'waiting' }
+        if (t.venue === 'kalshi') {
+          if (!kalshi.sell || !kalshi.findOrder) { keep(t, 'selling is not available'); continue }
+          if (exit.pending) { keep(t, 'an earlier sell is still being confirmed; checked on the next cycle'); continue }
+          // The kill switch pulled any resting sell; count what it sold first.
+          if (exit.orderId) {
+            const u = await kalshi.status(exit.orderId, { contract: t.contract, side: t.side })
+            if (!u) { keep(t, 'its resting sell could not be read'); continue }
+            exit = { ...withOrderTotals(exit, { contracts: u.filledContracts, avgC: u.avgFillC, feeUsd: u.feeUsd }), status: 'waiting', orderId: null, prior: undefined, killed: false }
+          }
+        }
+        const held = t.filledContracts - exit.filledContracts
+        if (held < 1) { this.recordExit(t, exit, 'everything held had sold'); continue }
+        const bid = await this.bidFor(t)
+        if (!bid) { keep(t, 'nobody is bidding on it right now'); continue }
+        if (onlyInProfit && bid.bidC <= t.avgFillC) { keep(t, `the bid ${bid.bidC}c is not above the ${t.avgFillC}c paid`); continue }
+
+        let fill: { contracts: number; priceC: number; feeUsd: number } | null
+        if (t.venue === 'paper') {
+          const n = Math.min(held, bid.size)
+          fill = { contracts: n, priceC: bid.bidC, feeUsd: exitFee(bid.bidC, n, true) }
+        } else {
+          const clientOrderId = `${t.id.slice(0, 36)}-c${Date.now().toString(36)}`
+          this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'ioc' }, cashout: true } })
+          const res = await kalshi.sell!({ contract: t.contract, side: t.side, contracts: held, priceC: bid.bidC, timeInForce: 'ioc', clientOrderId })
+          if (!res.ok) {
+            if (res.retryable) { keep(t, `the sell was not confirmed (${res.error}); it is checked on the next cycle`); continue }
+            this.update(t, { exit: { ...exit, pending: null, cashout: true } })
+            keep(t, `Kalshi refused the sell: ${res.error}`); continue
+          }
+          fill = res.filledContracts > 0 ? { contracts: res.filledContracts, priceC: res.avgFillC ?? bid.bidC, feeUsd: res.feeUsd } : null
+        }
+        const next: TicketExit = { ...(fill ? addExitFill(exit, fill) : exit), pending: null, cashout: true }
+        if (!fill || fill.contracts < 1) { this.update(t, { exit: next }); keep(t, `no contracts sold at the ${bid.bidC}c bid`); continue }
+        this.recordExit(t, next, `cash out: sold ${fill.contracts} @ ${fill.priceC}c`)
+        out.contracts += fill.contracts
+        out.pnlUsd += fill.contracts * (fill.priceC - t.avgFillC) / 100 - fill.feeUsd
+        if (next.filledContracts >= t.filledContracts) out.sold++
+        else { out.partly++; keep(t, `only ${fill.contracts} of ${held} were bid for at ${fill.priceC}c; the rest is held to settlement`) }
+      } catch (err) {
+        keep(t, (err as Error).message.slice(0, 160))
+      }
+    }
+    out.pnlUsd = Math.round(out.pnlUsd * 100) / 100
+    this.emitState()
+    return out
+  }
+
+  // The bid on the side this ticket holds, from the other side's ask.
+  private async bidFor(t: Ticket): Promise<{ bidC: number; size: number } | null> {
+    const venue = this.venues[t.venue === 'paper' ? t.priceSource : t.venue]
+    await this.bookSlot()
+    const other = await venue.quote(t.contract, t.side === 'yes' ? 'no' : 'yes')
+    return other ? bidFromOtherAsk(other.ask, other.askSize) : null
+  }
+
+  private async paperExit(t: Ticket, exit: TicketExit, held: number): Promise<void> {
+    const bid = await this.bidFor(t)
+    const fill = paperExitFill(exit, held, bid)
+    if (!fill) return
+    this.recordExit(t, addExitFill(exit, fill), `${exit.mode === 'limit' ? 'limit' : 'mark'} sold ${fill.contracts} @ ${fill.priceC}c (bid ${bid!.bidC}c x ${bid!.size})`)
+  }
+
+  // Every sell is written to the ledger as pending before it is sent, so an
+  // answer lost to a timeout or a crash is looked up on Kalshi by its client
+  // order id, never sent a second time. The kill switch is read again just
+  // before every sell, and a limit sell that lands after it was pressed is
+  // pulled straight back.
+  private async kalshiExit(t: Ticket, exit: TicketExit, held: number): Promise<void> {
+    const venue = this.venues.kalshi
+    if (!venue.sell || !venue.findOrder) return
+    const killed = (): boolean => settingsStore.account().killSwitch
+    const totals = (u: { filledContracts: number; avgFillC: number | null; feeUsd: number | null }) => ({ contracts: u.filledContracts, avgC: u.avgFillC, feeUsd: u.feeUsd })
+
+    if (exit.pending) {
+      const p = exit.pending
+      const id = await venue.findOrder(t.contract, p.clientOrderId)
+      if (!id) {
+        // It never reached the book. Clear it and carry on as before.
+        exit = { ...exit, pending: null }
+        this.update(t, { exit })
+      } else {
+        const u = await venue.status(id, { contract: t.contract, side: t.side })
+        if (!u) return
+        const base: TicketExit = { ...exit, pending: null, prior: { contracts: exit.filledContracts, avgC: exit.avgC, feeUsd: exit.feeUsd } }
+        if (p.timeInForce === 'gtc') {
+          let found = withOrderTotals({ ...base, status: 'resting', orderId: id }, totals(u))
+          // Found after the kill switch was pressed: pull it straight back.
+          if (killed() && !u.done && found.filledContracts < t.filledContracts) {
+            try { await venue.cancel(id, t.contract); found = { ...found, killed: true } } catch (err) { this.log(t.botId, t.botName, t.title, 'cancel_failed', (err as Error).message) }
+          }
+          return this.recordExit(t, found, 'found the limit sell on the book')
+        }
+        return this.recordExit(t, { ...withOrderTotals(base, totals(u)), prior: undefined }, `found the mark sell: ${u.filledContracts} sold`)
+      }
+      held = t.filledContracts - exit.filledContracts
+    }
+
+    if (exit.mode === 'limit') {
+      if (exit.status === 'waiting') {
+        if (killed()) return
+        const clientOrderId = `${t.id.slice(0, 36)}-x${Date.now().toString(36)}`
+        this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'gtc' } } })
+        const res = await venue.sell({ contract: t.contract, side: t.side, contracts: held, priceC: exit.targetC, timeInForce: 'gtc', clientOrderId })
+        if (!res.ok) {
+          // A timeout or a server error may have landed: it stays pending and is looked up next cycle.
+          if (res.retryable) return this.log(t.botId, t.botName, t.title, 'exit_retry', `limit sell not confirmed: ${res.error}`)
+          return this.recordExit(t, { ...exit, pending: null, status: 'failed', error: res.error }, `limit sell refused: ${res.error}`)
+        }
+        let next = withOrderTotals({ ...exit, pending: null, status: 'resting', orderId: res.venueOrderId, prior: { contracts: exit.filledContracts, avgC: exit.avgC, feeUsd: exit.feeUsd } }, totals(res))
+        if (killed() && res.venueOrderId && next.filledContracts < t.filledContracts) {
+          try { await venue.cancel(res.venueOrderId, t.contract); next = { ...next, killed: true } } catch (err) { this.log(t.botId, t.botName, t.title, 'cancel_failed', (err as Error).message) }
+        }
+        return this.recordExit(t, next, `limit sell resting: ${held} @ ${exit.targetC}c`)
+      }
+      if (exit.status === 'resting' && exit.orderId) {
+        const u = await venue.status(exit.orderId, { contract: t.contract, side: t.side })
+        if (!u) return
+        // Kalshi reports this order's own totals; what sold before it is kept.
+        const next = withOrderTotals(exit, totals(u))
+        const ended = u.done && next.filledContracts < t.filledContracts
+        if (next.filledContracts === exit.filledContracts && !ended) return
+        // Pulled by the kill switch: keep what sold and place the rest again later.
+        if (ended && exit.killed) return this.recordExit(t, { ...next, status: 'waiting', orderId: null, prior: undefined, killed: false }, `limit sell pulled by the kill switch after ${next.filledContracts} sold`)
+        // A sell that ended unfilled or part filled leaves the rest to settle.
+        return this.recordExit(t, ended ? { ...next, status: 'failed', orderId: null, error: 'the limit sell ended before it all sold' } : next,
+          ended ? 'limit sell ended; the rest is held to settlement' : `limit sold ${next.filledContracts} @ ${next.avgC}c`)
+      }
+      return
+    }
+    // mark: sell at the bid once it reaches the target, never more than held.
+    if (killed()) return
+    const bid = await this.bidFor(t)
+    if (!bid || bid.bidC < exit.targetC || killed()) return
+    const clientOrderId = `${t.id.slice(0, 36)}-m${Date.now().toString(36)}`
+    this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'ioc' } } })
+    const res = await venue.sell({ contract: t.contract, side: t.side, contracts: held, priceC: bid.bidC, timeInForce: 'ioc', clientOrderId })
+    if (!res.ok) {
+      if (res.retryable) return this.log(t.botId, t.botName, t.title, 'exit_retry', `mark sell not confirmed: ${res.error}`)
+      this.update(t, { exit: { ...exit, pending: null } })
+      return this.log(t.botId, t.botName, t.title, 'exit_failed', `mark sell refused: ${res.error}`)
+    }
+    const cleared: TicketExit = { ...exit, pending: null }
+    if (res.filledContracts < 1) return this.update(t, { exit: cleared })
+    this.recordExit(t, addExitFill(cleared, { contracts: res.filledContracts, priceC: res.avgFillC ?? bid.bidC, feeUsd: res.feeUsd }), `mark sold ${res.filledContracts} @ ${res.avgFillC ?? bid.bidC}c`)
+  }
+
+  // Writes the exit; once everything held is sold, the ticket closes with its P&L.
+  private recordExit(t: Ticket, exit: TicketExit, detail: string): void {
+    const allSold = exit.filledContracts >= t.filledContracts
+    const done: TicketExit = allSold ? { ...exit, status: 'done', orderId: null } : exit
+    this.update(t, allSold ? { exit: done, status: 'exited', pnlUsd: positionPnl({ ...t, exit: done }, null) } : { exit: done })
+    this.log(t.botId, t.botName, t.title, allSold ? 'exited' : `exit_${exit.status}`, detail)
   }
 
   private update(t: Ticket, patch: Partial<Ticket>): void {

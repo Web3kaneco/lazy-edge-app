@@ -35,7 +35,7 @@ This is what makes each user's use of Kalshi their own trading, which is the use
 | §3 | API use is limited to a member's own trading. | Orders go only to the account of the configured key. No shared or pooled accounts, no trading for anyone else. |
 | §3.1 | No collecting, storing or sharing API data except for the member's own trading. | No telemetry, analytics or crash reports. Kalshi data is cached locally only and the app never uploads it. A user may email their own trades to support in a report they read first, for help with their own trading. |
 | §3.2 | No facilitating other members' trading or account creation; no Kalshi password elsewhere. | API keys only, never the Kalshi password. No referral or sign up flows. |
-| §3.3 | No market manipulation. | No place and cancel strategies. Orders carry Kalshi's self trade prevention. |
+| §3.3 | No market manipulation. | No place and cancel strategies. An exit order only ever sells contracts the bot already holds, sized to what it holds; a resting exit is cancelled only by the kill switch or the market closing, never to move a price. Orders carry Kalshi's self trade prevention. |
 | §3.5 | No benchmarking or monitoring of Kalshi's performance. | Quote age is shown to the user; nothing measures Kalshi's latency or uptime. |
 | §3.7 | No sublicensing the API. | No relay server. Each install talks to Kalshi directly with its own key. |
 | §3.8 | Secure, encrypted channels only. | HTTPS to every remote host. Plain http only to the user's own computer (sign in callback, a local Ollama model). |

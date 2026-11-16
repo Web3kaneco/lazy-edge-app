@@ -7,6 +7,7 @@
 // the ledger as a note, so the old setting can always be read back.
 import { tradingDay } from './day'
 import { analyze, tagsOf, type Segment, type SettledLike } from './results'
+import type { TicketExit } from './exits'
 import type { PlayRules } from './review'
 import type { BotSettings } from './schema'
 import { diffSettings, type Change } from './share'
@@ -57,6 +58,7 @@ export interface TestTicket extends SettledLike {
   priceSource: string
   error: string | null
   rules?: PlayRules
+  exit?: TicketExit | null
 }
 
 export type TestEvent =
@@ -79,13 +81,14 @@ const traded = (t: TestTicket): boolean => t.status !== 'rejected' && !(t.status
 export function ticketsCsv(tickets: TestTicket[]): string {
   const head = ['created', 'trading_day', 'bot', 'bot_id', 'venue', 'priced_off', 'sport', 'lane', 'label', 'phase', 'hot', 'measured', 'edge_pp', 'our_p',
     'title', 'contract', 'side', 'status', 'ordered', 'filled', 'fill_c', 'cost_usd', 'fee_usd', 'ev_c', 'pnl_usd',
-    'rule_min_edge_pp', 'rule_min_ev_c', 'rule_haircut', 'rule_band_c', 'rule_max_trade_usd', 'error', 'id']
+    'rule_min_edge_pp', 'rule_min_ev_c', 'rule_haircut', 'rule_band_c', 'rule_max_trade_usd', 'exit_mode', 'exit_at_c', 'exit_sold', 'exit_avg_c', 'exit_status', 'error', 'id']
   const rows = [...tickets].sort((a, b) => a.createdAt - b.createdAt).map((t) => {
     const p = tagsOf(t)
     return [iso(t.createdAt), tradingDay(t.createdAt), t.botName, t.botId, t.venue, t.priceSource, p.sport, p.lane, p.label, p.phase, p.hot, p.measured,
       p.edgePp?.toFixed(2), p.ourP?.toFixed(4), t.title, t.contract, t.side, t.status, t.contracts, t.filledContracts, t.avgFillC,
       t.costUsd.toFixed(2), t.feeUsd.toFixed(2), t.evCents.toFixed(2), t.pnlUsd?.toFixed(2),
-      t.rules?.minEdgePp, t.rules?.minEvCents, t.rules?.edgeHaircut, t.rules ? t.rules.priceBandC.join('-') : null, t.rules?.maxTradeUsd, t.error, t.id]
+      t.rules?.minEdgePp, t.rules?.minEvCents, t.rules?.edgeHaircut, t.rules ? t.rules.priceBandC.join('-') : null, t.rules?.maxTradeUsd,
+      t.exit?.mode ?? 'hold', t.exit?.targetC, t.exit?.filledContracts, t.exit?.avgC, t.exit?.status, t.error, t.id]
   })
   return table(head, rows)
 }

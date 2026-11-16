@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell, type IpcMainInvokeEvent } from 'electron'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { release } from 'node:os'
 import { pathToFileURL } from 'node:url'
@@ -8,6 +8,7 @@ import { mailtoUrl, REPORT_MAX } from '@shared/report'
 import { defaultBot } from '@shared/ruleset'
 import type { BotSettings, ProviderId } from '@shared/schema'
 import { STARTERS } from '@shared/starters'
+import type { CashOutResult } from '@shared/exits'
 import { changeNote, exportFiles, paperTestPlan, settingsChanges } from '@shared/testdata'
 import { draftStrategy } from './ai/strategy'
 import { ai, allProviders } from './ai/registry'
@@ -117,6 +118,20 @@ function saveLogged(doc: unknown): BotSettings {
   return saved
 }
 
+// Every bot off, the kill switch on, then every open position across every
+// bot sold at the bid. Shared by the Cash out all button and the day profit
+// lock, and written to the ledger either way.
+async function cashOut(onlyInProfit: boolean, why: string): Promise<CashOutResult> {
+  const on = settingsStore.bots().filter((b) => b.enabled)
+  for (const b of on) saveLogged({ ...b, enabled: false })
+  await supervisor.killSwitch(true)
+  note(null, `Cash out ${why}${onlyInProfit ? ', positions in profit only' : ''}: ${on.length} bots switched off, kill switch on`)
+  const result = await supervisor.cashOutAll(onlyInProfit)
+  note(null, `Cash out sold ${result.contracts} contracts, ${result.sold} positions in full and ${result.partly} in part, ${result.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(result.pnlUsd).toFixed(2)} after fees; ${result.kept.length} kept`)
+  send('state', supervisor.publicState())
+  return { ...result, botsOff: on.length }
+}
+
 function registerIpc(): void {
   handle('terms:status', () => terms.status())
   handle('terms:accept', (version: string, acknowledged: number) => {
@@ -134,6 +149,20 @@ function registerIpc(): void {
   handle('engine:killSwitch', (on: boolean) => {
     if (!on && settingsStore.account().killSwitch) confirmNative('Release the kill switch?', 'Live bots that are switched on will start sending orders again on the next cycle.', 'Release')
     return supervisor.killSwitch(Boolean(on))
+  })
+
+  // Lock it in: every bot off, the kill switch on, every open position across
+  // every bot sold at the bid. The choice is made in a native dialog the page
+  // cannot click for itself.
+  handle('engine:cashOut', async () => {
+    const choice = dialog.showMessageBoxSync(win!, {
+      type: 'warning', title: 'Lazy Edge', noLink: true, defaultId: 2, cancelId: 2,
+      buttons: ['Cash out everything', 'Only positions in profit', 'Cancel'],
+      message: 'Cash out every open position, across all bots?',
+      detail: 'Every bot is switched off and the kill switch goes on, so nothing new is bought and nothing waits on the book. Then each open position, live and paper, is sold now at the best bid, as far as the bid goes. Whatever cannot be sold is held to settlement. Live sales are real orders and cannot be undone.'
+    })
+    if (choice === 2) return null
+    return cashOut(choice === 1, 'by hand')
   })
 
   handle('auth:status', async () => {
@@ -316,6 +345,17 @@ app.whenReady().then(async () => {
   supervisor = new Supervisor()
   supervisor.on('state', () => send('state', supervisor.publicState()))
   supervisor.on('ticket', (t) => send('ticket', t))
+  // The day profit lock fired: the same cash out as the button, and the user
+  // is told even if the window is behind something else.
+  supervisor.on('profitLock', (why: string) => {
+    void cashOut(false, `by the day profit lock: ${why}`).then((r) => {
+      send('cashOut', { ...r, why })
+      if (Notification.isSupported()) new Notification({ title: 'Lazy Edge cashed out', body: `Day profit lock: ${why}. Sold ${r.contracts} contracts, ${r.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(r.pnlUsd).toFixed(2)} after fees. Every bot is off and the kill switch is on.`.slice(0, 250) }).show()
+    }).catch((err) => {
+      note(null, `Day profit lock could not cash out: ${(err as Error).message}`)
+      if (Notification.isSupported()) new Notification({ title: 'Lazy Edge profit lock', body: `It fired but could not cash out: ${(err as Error).message}`.slice(0, 250) }).show()
+    })
+  })
   // No menu in a packaged build, so no DevTools shortcut.
   if (app.isPackaged) Menu.setApplicationMenu(null)
   registerIpc()

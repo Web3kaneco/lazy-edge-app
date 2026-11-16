@@ -16,11 +16,24 @@ export const GLOSSARY: Section[] = [
       t('Paper', 'Trades a local practice ledger against the real order books. No money moves. Paper results show what your settings would have done at prices that really existed.'),
       t('Live', 'Sends real orders to the venues you picked. Still obeys the account\'s dry run switch and the kill switch.'),
       t('Dry run', 'An account wide switch. Live bots go through every step and record the exact order they would send, but send nothing. It is on until you turn it off on the Account screen.'),
-      t('Kill switch', 'Stops every live order at once and cancels any order still waiting to fill. Paper bots keep running.'),
+      t('Kill switch', 'Stops every live order at once and cancels any order still waiting to fill, exit sells included. Paper bots keep running.'),
+      t('Day profit lock', 'Cash out all, done for you. Set on the Account screen: once the day is up your target percent, the app cashes out on its own, at once or after the day gives back a set number of points from its best. It watches live money or paper, measures the day against the account value at its first reading, and fires at most once a day while the engine runs.'),
+      t('Cash out all','Locks in where you are, across every bot at once. Every bot is switched off, the kill switch goes on, and every open position, live and paper, is sold now at the best bid, as far as the bid goes. You can choose to sell only positions in profit. Whatever cannot be sold is held to settlement, and the app lists each one and why.'),
       t('Rules engine', 'The bot trades on the numbers alone. If a play passes every setting, it is placed.'),
       t('Agent', 'Your AI model sees only plays that already passed every setting and can decline any of them. It can never add a trade or change a setting.'),
       t('Poll every', 'How often the bot checks for new plays, in seconds. Each bot keeps its own pace; none checks faster than every ten seconds.'),
-      t('Hold to settlement', 'Every position is held until the market settles. There is no selling early in this version.')
+      t('Hold to settlement', 'The position is kept until the market settles. This is every bot\'s exit unless you choose another.')
+    ]
+  },
+  {
+    title: 'Exit: how a bot gets out',
+    intro: 'Each bot picks one. Whatever an exit has not sold when the market settles is settled like any other position. Exits work on paper and on Kalshi; anything bought elsewhere is held to settlement.',
+    terms: [
+      t('Exit', 'How the bot closes a position: hold it to settlement, rest a sell at a set price the moment it fills, or sell at the market once the price reaches that mark.'),
+      t('Limit exit', 'The moment the entry fills, the bot rests a sell on the book at the entry price plus your target, for example bought at 55c, sell at 65c. It sells only if a buyer pays that price. On paper it fills once the real bid reaches the price, as a maker.'),
+      t('Cash out at the mark', 'The bot watches the book every cycle and sells at the bid the moment the bid reaches the entry price plus your target. It sells only what the bid offers, never more than it holds, and pays the taker fee.'),
+      t('Exit target', 'Cents above the entry price to sell at. 10 means bought at 55c, sold at 65c or better, before fees.'),
+      t('Trading both sides', 'Once everything a bot held in a market has sold, it holds nothing there, so it may enter that game again, on either side. Never bet against itself still blocks the other side while a position is open.')
     ]
   },
   {
@@ -32,8 +45,9 @@ export const GLOSSARY: Section[] = [
       t('SPREAD', 'Whether a team wins by more than a number of points, for example "Kansas City wins by over 3.5".'),
       t('TOTAL', 'Whether both teams together score over or under a number of points.'),
       t('TEAM_TOTAL', 'Whether one team scores over or under a number. Not yet graded by Lazy Edge, so it is off by default.'),
-      t('PROP', 'A player stat such as passing yards. Live prop plays are not yet graded by Lazy Edge.'),
-      t('Phase', 'Pregame trades only before kickoff or tip: once a game starts, or its start cannot be read, its plays count as live. Live trades during the game, which includes NFL hot plays and NBA live edges. Both does both.'),
+      t('PROP', 'A player stat. NBA props are points, rebounds and assists over or under a line, before the tip and in game; NFL props such as passing yards come with the live plays. Not yet graded by Lazy Edge.'),
+      t('Quarters', 'In game plays trade only in the quarters you tick, so you choose the quarter a bot starts in. Untick Q1 to start in the second quarter. Pregame plays are not affected, and overtime follows No entries in overtime.'),
+      t('Phase','Pregame trades only before kickoff or tip: once a game starts, or its start cannot be read, its plays count as live. Live trades during the game, which includes NFL hot plays and NBA live edges. Both does both.'),
       t('Hot play', 'A live NFL edge that met Lazy Edge\'s hot plays rule during a game. Bots set to Live or Both phase can trade them.'),
       t('Labels', 'Every board row is labelled by how its edge was found. A bot only trades labels you switch on.'),
       t('PRICE_GAP', 'Our probability clears the venue\'s ask by 3 or more points on a tight quote.'),
@@ -56,7 +70,8 @@ export const GLOSSARY: Section[] = [
       t('Maximum price age', 'A price older than this many seconds is treated as stale and never traded on.'),
       t('Price band', 'Only buy contracts priced between these two numbers, in cents. Very cheap and very expensive contracts are where small model errors cost the most.'),
       t('Require a game event trigger', 'Only take hot plays that Lazy Edge tied to a game event in its reasons. Pregame rows never carry one, so this limits the bot to live plays.'),
-      t('Measured edges only', 'Only take plays marked measured, the kinds of edge Lazy Edge has checked against real results.')
+      t('Measured edges only', 'Only take plays marked measured, the kinds of edge Lazy Edge has checked against real results.'),
+      t('Minimum chance to hit', 'The lowest chance, by Lazy Edge\'s number, that the contract bought pays out, set before the game and for each quarter. A player prop at 74% passes a 72% minimum in the second quarter and is skipped at an 80% minimum in the fourth. 0 means no minimum. Overtime uses the fourth quarter\'s.')
     ]
   },
   {
@@ -101,6 +116,9 @@ export const GATES: Record<string, string> = {
   clock_unknown: 'Game clock unreadable',
   overtime: 'Overtime',
   final_seconds: 'Too close to the end',
+  quarter_not_enabled: 'Quarter is off for this bot',
+  quarter_unknown: 'Quarter unreadable',
+  min_chance: 'Chance to hit is under your minimum',
   position_open: 'Already holds this market',
   opposes_position: 'Would bet against a position it holds',
   max_trades_today: 'Daily trade limit reached',

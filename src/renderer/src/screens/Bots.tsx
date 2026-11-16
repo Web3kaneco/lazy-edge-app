@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { defaultBot } from '@shared/ruleset'
 import { limitsSummary } from '@shared/limits'
-import { Lane, Phase, ProviderId, Sport, TradeableLabel, VenueId, type AccountSettings, type BotSettings } from '@shared/schema'
+import { Lane, Phase, ProviderId, Quarter, Sport, TradeableLabel, VenueId, type AccountSettings, type BotSettings } from '@shared/schema'
 import { changesFromDefaults, readShareCode, shareCode, type Change } from '@shared/share'
 import { STARTERS, starterOf } from '@shared/starters'
 import { api, type StrategyResult } from '../api'
@@ -142,6 +142,11 @@ export function Bots() {
                   {Phase.options.map((p) => <option key={p} value={p}>{p}</option>)}
                 </select>
               </Field>
+              {edit.market.phase !== 'pregame' && (
+                <Field label="Quarters" tip={tip('Quarters')} hint="In game plays trade only in the quarters ticked. Untick the early ones to start later in the game.">
+                  <Chips options={Quarter.options} value={edit.market.quarters} onChange={(v) => set((b) => { b.market.quarters = Quarter.options.filter((q) => v.includes(q)) })} />
+                </Field>
+              )}
               <Field label="Labels" tip={tip('Labels')} hint="ILLIQUID, ROLE_PRICED and UNPRICED are never traded and cannot be enabled."><Chips options={TradeableLabel.options} tips={tip} value={edit.market.labels} onChange={(v) => set((b) => { b.market.labels = v })} /></Field>
               <Field label="Venues" tip={tip('Venues')} hint="Best price after fees wins among these. A live bot skips any venue without a usable balance."><Chips options={VenueId.options} value={edit.market.venues} onChange={(v) => set((b) => { b.market.venues = v })} /></Field>
             </div>
@@ -158,6 +163,16 @@ export function Bots() {
             <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>
               <Toggle on={edit.entry.requireTrigger} onChange={(v) => set((b) => { b.entry.requireTrigger = v })} label={<>Require a game event trigger<Tip text={tip('Require a game event trigger')} /></>} />
               <Toggle on={edit.entry.measuredOnly} onChange={(v) => set((b) => { b.entry.measuredOnly = v })} label={<>Measured edges only<Tip text={tip('Measured edges only')} /></>} />
+            </div>
+            <div className="field" style={{ marginTop: 12 }}>
+              <label>Minimum chance to hit<Tip text={tip('Minimum chance to hit')} /></label>
+              <div className="grid" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 10 }}>
+                {(['pregame', ...Quarter.options] as const).map((k) => (
+                  <NumberField key={k} label={k === 'pregame' ? 'Pregame' : k} suffix="%" step={1} min={0} max={99} value={edit.entry.minChancePct[k]} measured={0}
+                    onChange={(v) => set((b) => { b.entry.minChancePct[k] = v })} />
+                ))}
+              </div>
+              <span className="hint">0 means no minimum. Overtime uses Q4.</span>
             </div>
 
             <div className="section">Size</div>
@@ -182,7 +197,25 @@ export function Bots() {
               <Toggle on={edit.guards.onePositionPerMarket} onChange={(v) => set((b) => { b.guards.onePositionPerMarket = v })} label={<>One position per market<Tip text={tip('One position per market')} /></>} />
               <Toggle on={edit.guards.noOpposingBets} onChange={(v) => set((b) => { b.guards.noOpposingBets = v })} label={<>Never bet against itself<Tip text={tip('Never bet against itself')} /></>} />
             </div>
-            <p className="small muted" style={{ marginTop: 12 }}>Every position is held to settlement in this version.<Tip text={tip('Hold to settlement')} /></p>
+
+            <div className="section">Exit</div>
+            <div className="grid cols-2">
+              <Field label="Exit" tip={`${tip('Exit')} ${tip('Trading both sides')}`} hint={edit.exit.mode === 'hold' ? 'Held until the market settles.' : edit.exit.mode === 'limit' ? 'A sell rests on the book the moment the entry fills.' : 'Sells at the bid once the bid reaches the mark.'}>
+                <select value={edit.exit.mode} onChange={(e) => set((b) => { b.exit.mode = e.target.value as BotSettings['exit']['mode'] })}>
+                  <option value="hold">Hold to settlement</option>
+                  <option value="limit">Limit exit at entry + target</option>
+                  <option value="mark">Cash out at the mark</option>
+                </select>
+              </Field>
+              {edit.exit.mode !== 'hold' && (
+                <NumberField label="Exit target" tip={tip('Exit target')} suffix="cents above entry" step={1} min={1} max={50} value={edit.exit.targetC} measured={M.exit.targetC} onChange={(v) => set((b) => { b.exit.targetC = Math.round(v) })} />
+              )}
+            </div>
+            {edit.exit.mode !== 'hold' && (
+              <p className="small muted" style={{ marginTop: 8 }}>
+                Once everything held in a market has sold, the bot may enter that game again, either side.{edit.guards.onePositionPerMarket ? '' : ' One position per market is off, so it may also add to a position it holds.'} Exits work on paper and Kalshi; anything bought elsewhere is held to settlement.
+              </p>
+            )}
             {account && <Limits bot={edit} account={account} />}
 
             <div className="row" style={{ marginTop: 18 }}>

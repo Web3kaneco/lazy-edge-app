@@ -28,6 +28,9 @@ export function stanceOf(contract: string): Stance | null {
 }
 
 export function opposes(a: Position, b: Position): boolean {
+  // The other side of the very same contract always bets against it, whatever
+  // the market, player props included.
+  if (a.contract.toUpperCase() === b.contract.toUpperCase()) return a.side !== b.side
   const x = stanceOf(a.contract)
   const y = stanceOf(b.contract)
   if (!x || !y || x.family !== y.family) return false

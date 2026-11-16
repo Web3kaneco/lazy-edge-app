@@ -4,7 +4,7 @@
 // traded, which is how the 2026-07-23 silent slate would have been caught.
 import { createHash } from 'node:crypto'
 import { tradingDay } from '@shared/day'
-import { NEVER_TRADE_LABELS, type AccountSettings, type BotSettings, type VenueId } from '@shared/schema'
+import { NEVER_TRADE_LABELS, type AccountSettings, type BotSettings, type Quarter, type VenueId } from '@shared/schema'
 import type { ContractSide, Signal, VenueQuote } from '@shared/signal'
 import { breakevenProb, evCents } from './fees'
 import { resolveSide } from './side'
@@ -30,6 +30,9 @@ export interface GateContext {
   botDailyPnlUsd: number
   accountDailyPnlUsd: number
   botTradesToday: number
+  // Earlier entries by this bot on this play today. A bot that exited may
+  // enter again, and each entry needs its own order id.
+  entriesToday?: number
 }
 
 export interface TradeDecision {
@@ -103,6 +106,20 @@ export function preGates(signal: Signal, bot: BotSettings, account: AccountSetti
     if (bot.guards.noEntryFinalS > 0 && (left === null || left <= bot.guards.noEntryFinalS)) {
       return skip('final_seconds', `${left ?? 'unknown'}s left`)
     }
+    // The quarters the user picked. A live play with no quarter cannot be
+    // shown to be in one, so it is refused.
+    const q = quarterOf(signal)
+    if (!q) return skip('quarter_unknown')
+    if (q !== 'OT' && !bot.market.quarters.includes(q)) return skip('quarter_not_enabled', q)
+  }
+
+  // 5b. The chance the contract pays out, against the minimum for this point
+  // of the game. It needs only our number, so no book is read for a play
+  // that could never pass.
+  const need = minChanceFor(signal, bot)
+  if (need > 0) {
+    if (signal.ourP === null) return skip('no_reading')
+    if (signal.ourP * 100 < need) return skip('min_chance', `${(signal.ourP * 100).toFixed(1)}% < ${need}%`)
   }
 
   // 6. Position and pace limits.
@@ -125,6 +142,21 @@ export function preGates(signal: Signal, bot: BotSettings, account: AccountSetti
     return skip('account_drawdown', ctx.accountDailyPnlUsd.toFixed(2))
   }
   return null
+}
+
+// The quarter a live play is in: Q1 to Q4, OT past the fourth, null when the
+// feed gives no period.
+export function quarterOf(signal: Pick<Signal, 'clock'>): Quarter | 'OT' | null {
+  const p = signal.clock?.period
+  if (signal.clock?.overtime || (p !== null && p !== undefined && p > 4)) return 'OT'
+  return p === 1 || p === 2 || p === 3 || p === 4 ? (`Q${p}` as Quarter) : null
+}
+
+export function minChanceFor(signal: Pick<Signal, 'phase' | 'clock'>, bot: BotSettings): number {
+  const m = bot.entry.minChancePct
+  if (signal.phase === 'pregame') return m.pregame
+  const q = quarterOf(signal)
+  return q === 'OT' ? m.Q4 : q ? m[q] : 0
 }
 
 export function evaluate(signal: Signal, bot: BotSettings, account: AccountSettings, ctx: GateContext): Decision {
@@ -195,7 +227,7 @@ export function evaluate(signal: Signal, bot: BotSettings, account: AccountSetti
     pCalibrated: pCal,
     breakeven: breakevenProb(quote.ask, quote.venue),
     dryRun: live && account.executionMode === 'dry_run',
-    idempotencyKey: createHash('sha256').update(`${bot.id}|${signal.key}|${day}`).digest('hex').slice(0, 32),
+    idempotencyKey: createHash('sha256').update(`${bot.id}|${signal.key}|${day}${ctx.entriesToday ? `|${ctx.entriesToday}` : ''}`).digest('hex').slice(0, 32),
     autoCancelS: bot.guards.autoCancelS,
     audit
   }

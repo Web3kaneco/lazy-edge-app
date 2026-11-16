@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { CashOutResult } from '@shared/exits'
 import type { ReportKind } from '@shared/report'
 import type { AccountSettings } from '@shared/schema'
 import { ago, api, useEngine, useNotices } from './api'
@@ -31,6 +32,10 @@ export function App() {
   const [termsAt, setTermsAt] = useState<string | null | undefined>(undefined)
   const engine = useEngine()
   const notices = useNotices()
+  const [cashing, setCashing] = useState(false)
+  const [cashed, setCashed] = useState<(CashOutResult & { why?: string }) | { error: string } | null>(null)
+  // The day profit lock cashes out on its own; its result shows the same way.
+  useEffect(() => window.lazyedge.on('cashOut', (r) => { setCashed(r); void api.account().then(setAccount) }), [])
 
   const refresh = useCallback(async () => {
     setBootError('')
@@ -98,7 +103,20 @@ export function App() {
         >
           {halted ? 'Release kill switch' : 'Kill switch'}
         </button>
+        <button
+          className="btn danger"
+          disabled={cashing}
+          onClick={async () => {
+            setCashing(true)
+            try { const r = await api.cashOut(); if (r) setCashed(r) } catch (e) { setCashed({ error: (e as Error).message }) }
+            setCashing(false); setAccount(await api.account())
+          }}
+          title="Switches every bot off, turns the kill switch on, and sells every open position across all bots at the bid now."
+        >
+          {cashing ? 'Cashing out…' : 'Cash out all'}
+        </button>
       </header>
+      {cashed && <CashOutNote result={cashed} onClose={() => setCashed(null)} />}
       <div className="shell">
         <aside className="side">
           {SCREENS.map((s) => (
@@ -126,6 +144,29 @@ export function App() {
             {screen === 'Terms' && <Terms acceptedAt={termsAt} />}
           </main>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// What a cash out did, in a bar under the header until it is closed.
+function CashOutNote({ result, onClose }: { result: (CashOutResult & { why?: string }) | { error: string }; onClose: () => void }) {
+  if ('error' in result) {
+    return <div className="notices"><div className="notice urgent"><div className="notice-text"><b>The cash out stopped</b><span>{result.error}</span></div><button className="btn ghost" onClick={onClose}>Close</button></div></div>
+  }
+  const money = `${result.pnlUsd < 0 ? '−' : '+'}$${Math.abs(result.pnlUsd).toFixed(2)}`
+  const lines = [
+    ...(result.why ? [`The day profit lock fired: ${result.why}.`] : []),
+    `${result.botsOff} ${result.botsOff === 1 ? 'bot' : 'bots'} switched off and the kill switch is on. Switch bots back on and release the kill switch when you are ready to trade again.`,
+    result.contracts ? `Sold ${result.contracts} contracts: ${result.sold} positions in full${result.partly ? ` and ${result.partly} in part` : ''}, ${money} on what sold after fees.` : 'Nothing was sold.',
+    ...result.kept.slice(0, 12).map((k) => `Kept ${k.title}: ${k.why}.`),
+    ...(result.kept.length > 12 ? [`And ${result.kept.length - 12} more kept; every one is in the Ledger.`] : [])
+  ]
+  return (
+    <div className="notices">
+      <div className={`notice ${result.kept.length ? 'warn' : ''}`}>
+        <div className="notice-text"><b>Cashed out</b><span>{lines.join('\n')}</span></div>
+        <button className="btn ghost" onClick={onClose}>Close</button>
       </div>
     </div>
   )

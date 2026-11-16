@@ -13,7 +13,7 @@ import { HttpError, requestJson } from '../data/http'
 import type { TradeDecision, VenueState } from '../rules/gates'
 import { kalshiFee } from '../rules/fees'
 import { vault } from '../store/vault'
-import { DRY_RUN_RESULT, type OrderUpdate, type PlaceResult, type Quote, type Venue } from './types'
+import { DRY_RUN_RESULT, type OrderUpdate, type PlaceResult, type Quote, type SellOrder, type Venue } from './types'
 
 const HOSTS = {
   production: 'https://api.elections.kalshi.com',
@@ -282,6 +282,40 @@ export class KalshiVenue implements Venue {
     } catch (err) {
       return reject((err as Error).message)
     }
+  }
+
+  // Sells a held position. The V2 book trades YES only, so selling YES is an
+  // ask on YES at our price and selling NO is a bid on YES at the complement.
+  // A sell frees collateral, so no shard funding. Kalshi accepts reduce_only
+  // only on immediate or cancel orders, so a mark exit can never open a new
+  // position; a resting limit exit cannot carry it, and is sized to exactly
+  // what this ticket holds.
+  async sell(order: SellOrder): Promise<PlaceResult> {
+    const yesPriceC = order.side === 'yes' ? order.priceC : 100 - order.priceC
+    try {
+      const res = await this.authed<Record<string, any>>('POST', '/portfolio/events/orders', {
+        ticker: order.contract,
+        side: order.side === 'yes' ? 'ask' : 'bid',
+        count: `${order.contracts}.00`,
+        price: (yesPriceC / 100).toFixed(2),
+        time_in_force: order.timeInForce === 'ioc' ? 'immediate_or_cancel' : 'good_till_canceled',
+        ...(order.timeInForce === 'ioc' ? { reduce_only: true } : {}),
+        self_trade_prevention_type: 'taker_at_cross',
+        exchange_index: -1,
+        client_order_id: order.clientOrderId
+      })
+      this.balance = null
+      return { ok: true, ...kalshiPlaced(res, order.side, order.contracts), venueOrderId: String(res.order_id ?? '') || null, error: null }
+    } catch (err) {
+      const retryable = !(err instanceof HttpError) || err.status === 429 || err.status >= 500
+      return { ok: false, venueOrderId: null, status: 'rejected', filledContracts: 0, avgFillC: null, feeUsd: 0, error: (err as Error).message, retryable }
+    }
+  }
+
+  async findOrder(contract: string, clientOrderId: string): Promise<string | null> {
+    const list = await this.authed<{ orders?: Record<string, any>[] }>('GET', '/portfolio/orders', undefined, `?ticker=${encodeURIComponent(contract)}&limit=200`)
+    const o = (list.orders ?? []).find((x) => x.client_order_id === clientOrderId)
+    return o?.order_id ? String(o.order_id) : null
   }
 
   // The V2 API has no read by order id, so the order is found in the market's

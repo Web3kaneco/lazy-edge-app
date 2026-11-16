@@ -97,6 +97,37 @@ export const STARTERS: Starter[] = [
     })
   },
   {
+    key: 'nba-props',
+    name: 'NBA player props',
+    summary: 'Points, rebounds and assists, pregame and in game, only when the chance to hit is high: 70% before the tip and in the first quarter, rising to 80% in the fourth. Untick quarters to choose when it starts.',
+    // Likely props are priced high, so the band reaches up to 92c and the edge
+    // bar sits lower than a moneyline's.
+    build: make('nba-props', 'NBA player props', (b) => {
+      b.market.sports = ['NBA']
+      b.market.lanes = ['PROP']
+      b.market.labels = ['PRICE_GAP']
+      b.entry.minChancePct = { pregame: 70, Q1: 70, Q2: 72, Q3: 75, Q4: 80 }
+      b.entry.minEdgePp = 3
+      b.entry.priceBandC = [40, 92]
+      b.entry.maxPriceAgeS = 60
+      b.guards.noEntryFinalS = 120
+    })
+  },
+  {
+    key: 'nba-scalp',
+    name: 'NBA scalp +10c',
+    summary: 'In game NBA moneylines, spreads and props. Every fill rests a sell 10 cents higher at once; once it sells, the bot may take either side of the game again.',
+    build: make('nba-scalp', 'NBA scalp +10c', (b) => {
+      b.market.sports = ['NBA']
+      b.market.lanes = ['MONEYLINE', 'SPREAD', 'PROP']
+      b.market.phase = 'live'
+      b.entry.maxPriceAgeS = 60
+      b.guards.noEntryFinalS = 120
+      b.exit = { mode: 'limit', targetC: 10 }
+      b.pollS = 10
+    })
+  },
+  {
     key: 'explorer',
     name: 'Explorer, tiny size',
     summary: 'Takes every tradeable label at a lower edge bar and $2 a trade at most, so Results can show which labels and lanes are worth keeping.',

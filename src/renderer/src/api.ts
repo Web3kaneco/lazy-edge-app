@@ -2,6 +2,8 @@
 // no trading decision; it renders state and sends intents.
 import { useEffect, useState } from 'react'
 import type { AccuracyEntry } from '@shared/accuracy'
+import type { CashOutResult } from '@shared/exits'
+import type { LockState } from '@shared/profitlock'
 import type { HeldBack } from '@shared/limits'
 import type { NoticesState } from '@shared/notices'
 import type { PlayReview } from '@shared/review'
@@ -25,6 +27,7 @@ export interface EngineState {
   venues: Record<string, { balanceUsd: number | null; equityUsd: number | null; configured: boolean }>
   recent: { at: number; botId: string; botName: string; title: string; outcome: string; detail: string }[]
   limits: { openLiveUsd: number; capUsd: number; liveBots: number; dryRun: boolean; held: HeldBack[] }
+  profitLock: LockState
 }
 
 export interface BoardData {
@@ -50,6 +53,7 @@ export const api = {
   stop: () => c('engine:stop'),
   cycle: () => c('engine:cycle'),
   killSwitch: (on: boolean) => c('engine:killSwitch', on),
+  cashOut: () => c<CashOutResult | null>('engine:cashOut'),
   authStatus: () => c<{ signedIn: boolean; usage?: { prefix: string; tier: string; calls_today: number }; error?: string }>('auth:status'),
   emailStart: (email: string) => c('auth:emailStart', email),
   emailVerify: (email: string, code: string) => c<{ tier: string; prefix: string }>('auth:emailVerify', email, code),

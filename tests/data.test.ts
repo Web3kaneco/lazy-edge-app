@@ -1,6 +1,6 @@
 import { constants, generateKeyPairSync, verify } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { hotPlayContract, kalshiRung, mlbEdges, nbaLiveEdges, nbaSpreadLadder, nflBoardPhase, nflBoardRows, nflHotPlays, nflMarketMaps, parseNbaClock, parseNflClock } from '../src/main/data/normalize'
+import { hotPlayContract, kalshiRung, mlbEdges, nbaLiveEdges, nbaProps, nbaSpreadLadder, nflBoardPhase, nflBoardRows, nflHotPlays, nflMarketMaps, parseNbaClock, parseNflClock } from '../src/main/data/normalize'
 import { resolveSide } from '../src/main/rules/side'
 import { kalshiAsk, kalshiBalance, kalshiHeaders } from '../src/main/venues/kalshi'
 
@@ -379,5 +379,41 @@ describe('NBA rows once the game is under way', () => {
   })
   it('is live once points are scored, even if the feed drops the period', () => {
     expect(nbaLiveEdges([{ ...row, period: 0, clock: '', home_score: 12, away_score: 9 }], NOW).signals[0]!.phase).toBe('live')
+  })
+})
+
+describe('NBA player props, 2026-11-16', () => {
+  const game = (over: Record<string, unknown> = {}, player: Record<string, unknown> = {}) => [{
+    game_id: 'g9', home_team: 'BBB', away_team: 'AAA', period: 2, clock: '6:00', is_pregame: false,
+    players: [{
+      player_name: 'Player One', team: 'AAA', availability: 'ACTIVE',
+      market_line: 24.5, pts_market_id: 'KXNBAPTS-99JAN01AAABBB-AAAPONE-25', pts_venue: 'kalshi', likelihood_over: 0.78, pts_sim_p_over: 0.6,
+      pts_live_price: 0.7, pts_live_edge_pp: 8, current_points: 14,
+      reb_market_line: 8.5, reb_market_id: 'KXNBAREB-99JAN01AAABBB-AAAPONE-9', reb_venue: 'kalshi', reb_likelihood_over: 0.2,
+      ast_market_line: null,
+      ...player
+    }],
+    ...over
+  }]
+
+  it('takes the side we give the better chance, in game, with the quarter', () => {
+    const { signals } = nbaProps(game(), 0)
+    expect(signals).toHaveLength(2)
+    const [pts, reb] = signals
+    expect(pts).toMatchObject({ lane: 'PROP', phase: 'live', signalType: 'BUY_OVER', explicitSide: 'yes', ourP: 0.78, edgePp: 8, clock: { period: 2 } })
+    expect(pts!.quotes[0]).toMatchObject({ contract: 'KXNBAPTS-99JAN01AAABBB-AAAPONE-25', side: 'yes' })
+    expect(reb).toMatchObject({ signalType: 'BUY_UNDER', explicitSide: 'no' })
+    expect(reb!.ourP).toBeCloseTo(0.8)
+    for (const s of signals) expect(resolveSide(s)).toBe(s.explicitSide)
+  })
+
+  it('uses the simulation before the tip, and skips a player listed out', () => {
+    expect(nbaProps(game({ is_pregame: true, period: 0 }), 0).signals[0]).toMatchObject({ phase: 'pregame', ourP: 0.6, clock: null })
+    expect(nbaProps(game({}, { availability: 'OUT' }), 0).signals).toHaveLength(0)
+  })
+
+  it('refuses a stat with no Kalshi contract rather than guessing', () => {
+    const out = nbaProps(game({}, { pts_venue: 'fanduel' }), 0)
+    expect(out.refused).toContainEqual({ source: 'nba.props', reason: 'no Kalshi contract' })
   })
 })

@@ -9,11 +9,13 @@
 import { app } from 'electron'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import type { TicketExit } from '@shared/exits'
 import type { PlayRules } from '@shared/review'
 import type { ContractSide, PlayTags } from '@shared/signal'
 import type { VenueId } from '@shared/schema'
 
-export type OrderStatus = 'dry_run' | 'resting' | 'filled' | 'partial' | 'cancelled' | 'rejected' | 'settled'
+// exited: everything held was sold before settlement; its P&L is final.
+export type OrderStatus = 'dry_run' | 'resting' | 'filled' | 'partial' | 'cancelled' | 'rejected' | 'settled' | 'exited'
 // Statuses that may still hold a position, until the ticket carries a P&L.
 export const OPEN: OrderStatus[] = ['resting', 'filled', 'partial', 'dry_run']
 export const isOpen = (t: { status: OrderStatus; pnlUsd: number | null }): boolean => OPEN.includes(t.status) && t.pnlUsd === null
@@ -50,6 +52,9 @@ export interface Ticket {
   // The bot's entry and size rules when it placed, so a play check judges it
   // by the rules it ran under. Missing on tickets before 0.3.0-beta.1.
   rules?: PlayRules
+  // How the bot gets out, when it is set to exit before settlement. Missing
+  // on a ticket held to settlement and on tickets before 0.6.0.
+  exit?: TicketExit | null
 }
 
 export type LedgerEvent =
