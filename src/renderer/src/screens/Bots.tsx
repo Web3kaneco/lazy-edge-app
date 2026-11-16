@@ -83,6 +83,7 @@ export function Bots() {
           ))}
           {!bots.length && <p className="muted small">No bots yet.</p>}
         </div>
+        <PaperTest onDone={() => load(edit?.id)} />
         <Starters have={new Set(bots.map((b) => b.id))} onAdd={async (b) => { await api.saveBot(b); await load(b.id) }} />
         <Import onAdd={async (b) => {
           // A name already in the list gets a suffix, so the two are never confused.
@@ -228,6 +229,42 @@ function ChangeTable({ changes }: { changes: Change[] }) {
 }
 
 // Preloaded on first launch; one the user deleted can be added back here.
+// Every bot on in paper at once, and the data it makes written to files.
+function PaperTest({ onDone }: { onDone: () => Promise<void> }) {
+  const [cap, setCap] = useState(2)
+  const [days, setDays] = useState(30)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  const run = async (fn: () => Promise<string>): Promise<void> => {
+    setErr(''); setMsg('')
+    try { setMsg(await fn()); await onDone() } catch (e) { setErr((e as Error).message) }
+  }
+  return (
+    <div className="card">
+      <h2>Paper test<Tip text="Switches every paper bot on at once and adds back any starter bot that is missing, so every strategy runs side by side on practice money. Each bot keeps its own rules and limits. Live bots are never touched. Every change is written to the ledger, so the old settings can be read back." /></h2>
+      <p className="small muted">Runs while the app is open and the engine is started. Change any bot's settings as it runs; each change is logged, and every trade records the rules it ran under.</p>
+      <div className="row" style={{ alignItems: 'end', gap: 10 }}>
+        <NumberField label="Largest trade, $" value={cap} min={0} step={1} onChange={setCap} />
+        <button className="btn primary" onClick={() => void run(async () => {
+          if (!confirm(`Switch every paper bot on${cap > 0 ? ` and hold each to $${cap} a trade at most` : ''}? Missing starter bots are added back. Live bots are left as they are.`)) return ''
+          const r = await api.paperTest(cap > 0 ? cap : null)
+          return `${r.on} bots are on in paper.${r.live.length ? ` Left alone because they are live: ${r.live.join(', ')}.` : ''} Press Start engine on the Dashboard if it is not running.`
+        })}>Paper test every bot</button>
+        <button className="btn ghost" onClick={() => void run(async () => `${(await api.paperStop()).off} paper bots switched off.`)}>Switch paper bots off</button>
+      </div>
+      <div className="row" style={{ alignItems: 'end', gap: 10, marginTop: 10 }}>
+        <NumberField label="Days of data" value={days} min={1} step={1} onChange={setDays} />
+        <button className="btn" onClick={() => void run(async () => {
+          const folder = await api.exportTest(days)
+          return folder ? `Saved to ${folder}. summary.txt reads it out; the CSV files open in Excel.` : ''
+        })}>Export test data</button>
+      </div>
+      {msg && <p className="small good">{msg}</p>}
+      {err && <p className="small bad">{err}</p>}
+    </div>
+  )
+}
+
 function Starters({ have, onAdd }: { have: Set<string>; onAdd: (b: BotSettings) => Promise<void> }) {
   const missing = STARTERS.filter((s) => !have.has(`starter-${s.key}`))
   return (

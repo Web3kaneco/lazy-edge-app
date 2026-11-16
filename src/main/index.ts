@@ -1,12 +1,14 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron'
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { release } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { dayBounds, tradingDay } from '@shared/day'
 import { mailtoUrl, REPORT_MAX } from '@shared/report'
 import { defaultBot } from '@shared/ruleset'
-import type { ProviderId } from '@shared/schema'
+import type { BotSettings, ProviderId } from '@shared/schema'
+import { STARTERS } from '@shared/starters'
+import { changeNote, exportFiles, paperTestPlan, settingsChanges } from '@shared/testdata'
 import { draftStrategy } from './ai/strategy'
 import { ai, allProviders } from './ai/registry'
 import { accuracy } from './bots/accuracy'
@@ -100,6 +102,21 @@ function handle<A extends unknown[], R>(channel: string, fn: (...args: A) => R |
   })
 }
 
+const note = (botId: string | null, text: string): void => ledger.append({ type: 'note', at: Date.now(), botId, text: text.slice(0, 4000) })
+
+// Saves a bot and writes what changed to the ledger, so the record shows which
+// settings every trade ran under and when each one moved.
+function saveLogged(doc: unknown): BotSettings {
+  const before = settingsStore.bots().find((b) => b.id === (doc as { id?: string })?.id)
+  const saved = settingsStore.saveBot(doc)
+  if (!before) note(saved.id, `${saved.name}: added, ${saved.enabled ? 'on' : 'off'}, in ${saved.mode}`)
+  else {
+    const changes = settingsChanges(before, saved)
+    if (changes.length) note(saved.id, changeNote(saved.name, changes))
+  }
+  return saved
+}
+
 function registerIpc(): void {
   handle('terms:status', () => terms.status())
   handle('terms:accept', (version: string, acknowledged: number) => {
@@ -175,11 +192,51 @@ function registerIpc(): void {
     if (next?.enabled && next.mode === 'live' && !(before?.enabled && before.mode === 'live')) {
       confirmNative(`Switch on "${String(next.name ?? 'this bot')}" in live mode?`, 'It will place real orders under its settings, subject to the dry run switch and the kill switch.', 'Switch on')
     }
-    const saved = settingsStore.saveBot(doc)
+    const saved = saveLogged(doc)
     supervisor.restartTimer()
     return saved
   })
-  handle('bots:delete', (id: string) => settingsStore.deleteBot(String(id)))
+  handle('bots:delete', (id: string) => {
+    const gone = settingsStore.bots().find((b) => b.id === String(id))
+    settingsStore.deleteBot(String(id))
+    if (gone) note(gone.id, `${gone.name}: deleted`)
+  })
+  // Every paper bot switched on, and any starter not in the list added, the
+  // way a user would do it by hand. Live bots are never touched.
+  handle('bots:paperTest', (maxTradeUsd: number | null) => {
+    terms.require()
+    const bots = settingsStore.bots()
+    const have = new Set(bots.map((b) => b.id))
+    const missing = STARTERS.map((s) => s.build()).filter((b) => !have.has(b.id))
+    const cap = maxTradeUsd === null ? null : Number(maxTradeUsd)
+    const plan = paperTestPlan(bots, missing, cap !== null && Number.isFinite(cap) && cap > 0 ? cap : null)
+    for (const b of plan.save) saveLogged(b)
+    note(null, `Paper test started: ${plan.save.length} bots on in paper${cap ? `, largest trade $${cap}` : ''}${plan.live.length ? `; live bots left as they are: ${plan.live.join(', ')}` : ''}`)
+    supervisor.restartTimer()
+    return { on: plan.save.length, live: plan.live }
+  })
+  handle('bots:paperStop', () => {
+    const on = settingsStore.bots().filter((b) => b.enabled && b.mode === 'paper')
+    for (const b of on) saveLogged({ ...b, enabled: false })
+    note(null, `Paper test stopped: ${on.length} paper bots switched off`)
+    supervisor.restartTimer()
+    return { off: on.length }
+  })
+  // Test data for the user to study or send: trades, skips, settings changes
+  // and a summary, written to a folder the user picks. Read only.
+  handle('test:export', async (days: number) => {
+    const d = Math.min(Math.max(Number(days) || 30, 1), 3650)
+    const to = Date.now()
+    const from = to - d * 86_400_000
+    const files = exportFiles(ledger.tickets(d), ledger.eventsBetween(from, to + 1), settingsStore.bots(), from, to)
+    const { canceled, filePaths } = await dialog.showOpenDialog(win!, { title: 'Choose where to save the test data', defaultPath: app.getPath('documents'), properties: ['openDirectory', 'createDirectory'] })
+    if (canceled || !filePaths[0]) return null
+    const folder = join(filePaths[0], `Lazy Edge test data ${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}`)
+    mkdirSync(folder, { recursive: true })
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(folder, name), text)
+    void shell.openPath(folder)
+    return folder
+  })
   // Write only: the renderer can put a share code on the clipboard, never read it.
   handle('clipboard:write', (text: string) => clipboard.writeText(String(text).slice(0, REPORT_MAX)))
   handle('bots:draft', async (sentence: string, provider: ProviderId, model?: string) => {

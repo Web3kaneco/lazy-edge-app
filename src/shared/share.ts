@@ -36,9 +36,8 @@ export interface Change { field: string; from: unknown; to: unknown }
 // pairs such as the price band keep theirs.
 const asSet = (v: unknown): unknown => Array.isArray(v) && v.every((x) => typeof x === 'string') ? [...v].sort() : v
 
-// Every setting that differs from the measured defaults, so an imported bot
-// is read before it is saved.
-export function changesFromDefaults(bot: BotSettings): Change[] {
+// Every field that differs between two settings documents, by its path.
+export function diffSettings(before: unknown, after: unknown): Change[] {
   const out: Change[] = []
   const walk = (a: unknown, b: unknown, path: string): void => {
     if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a)) {
@@ -47,8 +46,14 @@ export function changesFromDefaults(bot: BotSettings): Change[] {
       out.push({ field: path, from: a, to: b })
     }
   }
+  walk(before, after, '')
+  return out
+}
+
+// Every setting that differs from the measured defaults, so an imported bot
+// is read before it is saved.
+export function changesFromDefaults(bot: BotSettings): Change[] {
   const { id: _a, name: _b, enabled: _c, ...base } = defaultBot('x', 'x')
   const { id: _d, name: _e, enabled: _f, ...mine } = bot
-  walk(base, mine, '')
-  return out
+  return diffSettings(base, mine)
 }
