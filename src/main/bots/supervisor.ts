@@ -655,6 +655,7 @@ export class Supervisor extends EventEmitter {
       if (t.pnlUsd !== null || !['resting', 'partial', 'filled'].includes(t.status)) continue
       const venue = this.venues[t.venue]
       try {
+        if (t.comboAccept && t.status === 'resting') { await this.resolveCombo(t); continue }
         if ((t.status === 'resting' || t.status === 'partial') && t.venueOrderId) {
           const u = await venue.status(t.venueOrderId, { contract: t.contract, side: t.side })
           if (u) {
@@ -781,6 +782,7 @@ export class Supervisor extends EventEmitter {
     if (real) {
       if (account.killSwitch) return
       if (pricing.disabled) return say('combo_skipped', `live combos are off: ${pricing.disabled}`)
+      if (all.some((t) => t.comboAccept && t.status === 'resting')) return say('combo_skipped', 'an earlier combo is still waiting for its fill')
       this.liveRfqTimes = this.liveRfqTimes.filter((t) => Date.now() - t < 3_600_000)
       if (this.liveRfqTimes.length >= LIVE_RFQ_PER_HOUR) return
       this.liveRfqTimes.push(Date.now())
@@ -865,12 +867,33 @@ export class Supervisor extends EventEmitter {
         if (n >= contracts || (n > 0 && n === last)) break
         last = n
       }
+      const accept = { at: acceptedAt, reading, expectedC: priceC }
       if (!rows.length) {
-        write({ ...base, status: 'cancelled', error: acceptError ? `accept failed: ${acceptError}` : 'the maker did not confirm the quote' })
-        return say('cancelled', acceptError ? `the accept failed and nothing filled: ${acceptError}` : 'quote accepted, the maker did not confirm it')
+        // Nothing filled yet is not the same as nothing filled: the combo is
+        // kept as waiting, reconcile keeps reading Kalshi's fills for it, and
+        // no new live combo goes out until it is settled either way.
+        write({ ...base, status: 'resting', comboAccept: accept, error: acceptError ? `accept answer lost: ${acceptError}` : null })
+        return say('combo_waiting', acceptError ? `the accept answer was lost (${acceptError}); watching Kalshi's fills for it` : 'quote accepted, no fill yet; watching Kalshi\'s fills for it')
       }
-      // Each side that filled is its own ticket at its own price, so the
-      // ledger always holds what Kalshi holds.
+      this.recordComboFills({ ...base, comboAccept: accept }, rows)
+    } catch (err) {
+      say('combo_failed', (err as Error).message.slice(0, 160))
+    } finally {
+      if (rfq && !acceptTried) await kalshi.deleteRfq(rfq).catch(() => {})
+    }
+  }
+
+  // A live combo's fills, from Kalshi's own record: each side that filled is
+  // its own ticket at its own price, so the ledger always holds what Kalshi
+  // holds. The fill then confirms how quotes read, or switches live combos off.
+  private recordComboFills(base: Ticket, rows: Awaited<ReturnType<KalshiVenue['fillsSince']>>): void {
+    const acc = base.comboAccept!
+    const priceC = acc.expectedC
+    const contracts = base.contracts
+    const pricing = readComboPricing()
+    const write = (t: Ticket): void => { ledger.append({ type: 'ticket', ticket: { ...t, updatedAt: Date.now() } }); this.emit('ticket', t) }
+    const say = (outcome: string, detail: string): void => this.log(base.botId, base.botName, base.title, outcome, detail)
+    {
       const bySide = new Map<'yes' | 'no' | 'unknown', { n: number; cost: number; fee: number }>()
       for (const f of rows) {
         const side = fillPosition(f.action, f.side) ?? 'unknown'
@@ -880,9 +903,13 @@ export class Supervisor extends EventEmitter {
       }
       const yes = bySide.get('yes')
       const odd = [...bySide.entries()].filter(([s]) => s !== 'yes')
+      // The YES ticket keeps the waiting ticket's id, so it replaces it; with
+      // nothing on YES the waiting ticket is closed as cancelled.
       if (yes) {
         const avg = Math.round((yes.cost / yes.n) * 100) / 100
-        write({ ...base, filledContracts: yes.n, avgFillC: avg, costUsd: yes.cost / 100, feeUsd: Math.round(yes.fee * 10000) / 10000, status: yes.n < contracts ? 'partial' : 'filled' })
+        write({ ...base, error: null, filledContracts: yes.n, avgFillC: avg, costUsd: yes.cost / 100, feeUsd: Math.round(yes.fee * 10000) / 10000, status: yes.n < contracts ? 'partial' : 'filled' })
+      } else if (base.status === 'resting') {
+        write({ ...base, status: 'cancelled' })
       }
       for (const [side, g] of odd) {
         write({ ...base, id: `${base.id}-${side}`, side: side === 'no' ? 'no' : 'yes', filledContracts: g.n, avgFillC: Math.round((g.cost / g.n) * 100) / 100, costUsd: g.cost / 100, feeUsd: g.fee, status: 'filled', error: `filled as ${side} where YES was expected` })
@@ -891,15 +918,24 @@ export class Supervisor extends EventEmitter {
       if (odd.length || yesAvg === null || !fillMatches(priceC, yesAvg)) {
         const why = odd.length ? `a combo filled as ${odd.map(([s, g]) => `${g.n} ${s}`).join(' and ')} where YES was expected` : `a combo filled at ${yesAvg?.toFixed(2)}c where ${priceC}c was expected`
         writeComboPricing({ ...pricing, confirmed: null, disabled: why })
-        ledger.append({ type: 'note', at: Date.now(), botId: bot.id, text: `Live combos switched off: ${why}. Check the position on Kalshi.` })
+        ledger.append({ type: 'note', at: Date.now(), botId: base.botId, text: `Live combos switched off: ${why}. Check the position on Kalshi.` })
         return say('combo_mismatch', `${why}; live combos are off until this is looked at`)
       }
-      if (!pricing.confirmed) writeComboPricing({ ...pricing, confirmed: reading })
+      if (!pricing.confirmed) writeComboPricing({ ...pricing, confirmed: acc.reading })
       say('filled', `YES ${yes!.n} @ ${yesAvg.toFixed(2)}c, as the quote read`)
-    } catch (err) {
-      say('combo_failed', (err as Error).message.slice(0, 160))
-    } finally {
-      if (rfq && !acceptTried) await kalshi.deleteRfq(rfq).catch(() => {})
+    }
+  }
+
+  // A live combo accepted with no fill seen yet: Kalshi's fills are read again
+  // each reconcile. After thirty minutes with nothing, it is closed as not
+  // filled; until then it blocks new live combos.
+  private async resolveCombo(t: Ticket): Promise<void> {
+    const acc = t.comboAccept!
+    const rows = await (this.venues.kalshi as KalshiVenue).fillsSince(t.contract, acc.at)
+    if (rows.length) return this.recordComboFills(t, rows)
+    if (Date.now() - acc.at > 30 * 60_000) {
+      this.update(t, { status: 'cancelled', error: 'no fill on Kalshi thirty minutes after the accept' })
+      this.log(t.botId, t.botName, t.title, 'cancelled', 'no fill on Kalshi thirty minutes after the accept')
     }
   }
 

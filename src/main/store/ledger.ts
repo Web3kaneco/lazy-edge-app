@@ -58,6 +58,9 @@ export interface Ticket {
   // A combo's legs, so each counts against its own game's limits and a bot
   // never bets against a leg it holds inside a combo.
   legs?: { contract: string; side: ContractSide; gameId: string }[]
+  // A live combo's accepted quote: when, how the quote read, and the price
+  // expected, so a fill that comes late is still recorded and checked.
+  comboAccept?: { at: number; reading: 'yes_bid' | 'one_minus_no_bid'; expectedC: number }
 }
 
 export type LedgerEvent =
