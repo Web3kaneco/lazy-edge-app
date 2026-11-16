@@ -814,7 +814,9 @@ export class Supervisor extends EventEmitter {
       const contracts = Math.floor(best.quote.contracts)
       // The maker sized the quote; it must still fit the budget at its price.
       // The first unconfirmed live combo is one contract, which may cost up to $1.
-      const cap = real && !pricing.confirmed ? Math.max(budgetUsd, 1) : budgetUsd
+      const probe = real && !pricing.confirmed
+      if (probe && contracts !== 1) return say('combo_skipped', `the quote is for ${best.quote.contracts} contracts; until a fill confirms how quotes read, only a one contract quote is taken`)
+      const cap = probe ? Math.max(budgetUsd, 1) : budgetUsd
       if (contracts < 1 || (contracts * priceC) / 100 > cap + 0.01) {
         return say('combo_skipped', `the quote for ${best.quote.contracts} at ${priceC}c does not fit the $${cap} budget`)
       }
