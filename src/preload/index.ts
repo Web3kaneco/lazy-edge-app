@@ -9,7 +9,7 @@ const CHANNELS = [
   'keys:describe', 'keys:set', 'keys:remove', 'keys:test',
   'ai:models', 'ai:configured',
   'settings:account', 'settings:saveAccount',
-  'bots:list', 'bots:new', 'bots:save', 'bots:delete', 'bots:draft', 'bots:paperTest', 'bots:paperStop', 'test:export',
+  'bots:list', 'bots:new', 'bots:save', 'bots:delete', 'bots:draft', 'bots:paperTest', 'bots:paperStop', 'test:export', 'results:apply',
   'ledger:tickets', 'ledger:events',
   'accuracy:get', 'accuracy:run', 'clipboard:write',
   'play:check', 'report:context', 'report:email', 'report:save',

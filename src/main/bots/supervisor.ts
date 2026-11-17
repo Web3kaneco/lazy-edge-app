@@ -832,7 +832,8 @@ export class Supervisor extends EventEmitter {
         why: `${pick.legs.length} legs, our chance ${(pick.chance * 100).toFixed(1)}% by ${pick.source === 'lazy_edge' ? 'Lazy Edge' : 'the legs multiplied'}, legs ${pick.legsPriceC}c one by one`,
         audit: [`quote ${best.price.why}`, `reading ${reading}${pricing.confirmed ? ' (confirmed)' : ' (not yet confirmed by a live fill)'}`, ...pick.legs.map((l) => `leg ${l.side.toUpperCase()} ${l.contract} at ${l.askC}c, ours ${(l.ourP * 100).toFixed(1)}%`)],
         error: null,
-        play: tags ? { ...playTags(tags), lane: 'COMBO', edgePp: edge, ourP: pick.chance } : undefined,
+        // A combo backs no one team, so it carries no score or favorite.
+        play: tags ? { ...playTags(tags), lane: 'COMBO', edgePp: edge, ourP: pick.chance, lead: null, teamWinP: null } : undefined,
         rules: rulesOf(bot),
         exit: null,
         legs: pick.legs.map((l) => ({ contract: l.contract, side: l.side, gameId: l.gameId }))

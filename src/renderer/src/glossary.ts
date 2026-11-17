@@ -73,7 +73,9 @@ export const GLOSSARY: Section[] = [
       t('Price band', 'Only buy contracts priced between these two numbers, in cents. Very cheap and very expensive contracts are where small model errors cost the most.'),
       t('Require a game event trigger', 'Only take hot plays that Lazy Edge tied to a game event in its reasons. Pregame rows never carry one, so this limits the bot to live plays.'),
       t('Measured edges only', 'Only take plays marked measured, the kinds of edge Lazy Edge has checked against real results.'),
-      t('Minimum chance to hit', 'The lowest chance, by Lazy Edge\'s number, that the contract bought pays out, set before the game and for each quarter. A player prop at 74% passes a 72% minimum in the second quarter and is skipped at an 80% minimum in the fourth. 0 means no minimum. Overtime uses the fourth quarter\'s.')
+      t('Minimum chance to hit', 'The lowest chance, by Lazy Edge\'s number, that the contract bought pays out, set before the game and for each quarter. A player prop at 74% passes a 72% minimum in the second quarter and is skipped at an 80% minimum in the fourth. 0 means no minimum. Overtime uses the fourth quarter\'s.'),
+      t('Most points behind', 'For moneyline and spread plays during a game: the most points the team the bot would back may be behind, set for each quarter. 10 in the fourth means a team down 11 with six minutes left is skipped, however good its price looks. A spread play on the NO side backs the other team. Empty means no limit, and 0 means never a team that is behind. It reads the live score, which only NBA plays carry for now, so other sports are not limited by it; with a limit set, an NBA play whose score cannot be read is skipped.'),
+      t('Favorites only', 'For moneyline and spread plays: only back the team the market prices at 50% or more to win the game. A trailing or long shot team can carry a real edge and still lose most nights; this keeps the bot on the side more likely to win.')
     ]
   },
   {
@@ -121,6 +123,10 @@ export const GATES: Record<string, string> = {
   quarter_not_enabled: 'Quarter is off for this bot',
   quarter_unknown: 'Quarter unreadable',
   min_chance: 'Chance to hit is under your minimum',
+  not_favorite: 'Backs the team the market expects to lose',
+  favorite_unknown: 'Could not read which team is favored',
+  trailing: 'Backs a team further behind than you allow',
+  score_unknown: 'Score unreadable',
   position_open: 'Already holds this market',
   opposes_position: 'Would bet against a position it holds',
   max_trades_today: 'Daily trade limit reached',

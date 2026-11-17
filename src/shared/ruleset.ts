@@ -55,7 +55,9 @@ export function defaultBot(id: string, name: string): BotSettings {
       maxPriceAgeS: 180, // the API's own freshness rule
       requireTrigger: false,
       measuredOnly: false,
-      minChancePct: { pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 }
+      minChancePct: { pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 },
+      maxTrailing: { Q1: null, Q2: null, Q3: null, Q4: null },
+      favoritesOnly: false
     },
     size: {
       kellyMultiplier: 0.25, // the strategy plan's kelly_fraction default

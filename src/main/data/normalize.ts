@@ -351,6 +351,31 @@ export function nbaRowProblem(r: any): string | null {
 const nbaPhase = (row: any, clock: Signal['clock']): Signal['phase'] =>
   clock || (num(row?.home_score) ?? 0) + (num(row?.away_score) ?? 0) > 0 ? 'live' : 'pregame'
 
+// Where the game stands for the team a play backs (2026-11-17), from a live
+// model row: its points ahead (negative behind) and the market's chance it
+// wins, from kalshi_implied, the home win price. home is null when the play's
+// team cannot be matched to either side, and then nothing is claimed.
+export function nbaTeamState(row: any, home: boolean | null): NonNullable<Signal['team']> {
+  if (home === null) return { lead: null, winP: null }
+  const h = num(row?.home_score)
+  const a = num(row?.away_score)
+  const mid = num(row?.kalshi_implied)
+  return {
+    lead: h === null || a === null ? null : home ? h - a : a - h,
+    winP: mid === null || mid <= 0 || mid >= 1 ? null : home ? mid : 1 - mid
+  }
+}
+
+// Whether a team named on a row is the home side: true, false, or null when
+// it matches neither team.
+const isHomeTeam = (team: unknown, row: any): boolean | null => {
+  const t = String(team ?? '').trim().toUpperCase()
+  if (!t) return null
+  if (t === String(row?.home_team ?? '').trim().toUpperCase()) return true
+  if (t === String(row?.away_team ?? '').trim().toUpperCase()) return false
+  return null
+}
+
 export function nbaLiveEdges(body: any, now: number): Normalized {
   const out: Normalized = { signals: [], refused: [] }
   for (const r of Array.isArray(body) ? body : []) {
@@ -382,7 +407,8 @@ export function nbaLiveEdges(body: any, now: number): Normalized {
       label: 'PRICE_GAP', kelly: null, trigger: false, measured: false, clock,
       quotes: ticker ? [{ venue: 'kalshi', contract: ticker, side: 'yes', ask: null, askSize: null, priceAgeS: null }] : [],
       why: r.momentum_state && r.momentum_state !== 'NEUTRAL' ? `Momentum ${String(r.momentum_state).toLowerCase().replace('_', ' ')}` : null,
-      receivedAt: now, matchup: matchupOf(r)
+      receivedAt: now, matchup: matchupOf(r),
+      team: nbaTeamState(r, home)
     })
     if (!ticker) out.refused.push({ source: 'nba.edges', reason: 'no target ticker' })
   }
@@ -422,6 +448,10 @@ export function nbaSpreadLadder(liveRow: any, rungs: any, now: number): Normaliz
     // The rung the row states must be the rung the ticker carries.
     if (!sameLine(kalshiRung(ticker), line)) { out.refused.push({ source: 'nba.spread', reason: `ticker rung ${kalshiRung(ticker)} is not the row's ${line}` }); continue }
     const edge = num(r.edge)
+    // YES backs the named team to cover; NO backs the other team, the one
+    // that needs the named team to fall short.
+    const named = isHomeTeam(r.team, liveRow)
+    const backsHome = named === null ? null : side === 'yes' ? named : !named
     out.signals.push({
       key: `nba:${gid}:SPREAD:${ticker}:${side}`, sport: 'NBA', lane: 'SPREAD',
       phase: nbaPhase(liveRow, clock), gameId: gid,
@@ -433,7 +463,8 @@ export function nbaSpreadLadder(liveRow: any, rungs: any, now: number): Normaliz
       label: r.best_edge ? 'PRICE_GAP' : 'TAIL_RUNG', kelly: null, trigger: false, measured: false, clock,
       quotes: [{ venue: 'kalshi', contract: ticker, side, ask: null, askSize: null, priceAgeS: null }],
       why: r.best_edge ? 'The ladder rung with the widest disagreement, the one the server marks for bots.' : null,
-      receivedAt: now, matchup: matchupOf(liveRow)
+      receivedAt: now, matchup: matchupOf(liveRow),
+      team: nbaTeamState(liveRow, backsHome)
     })
   }
   return out

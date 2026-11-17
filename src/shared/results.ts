@@ -12,8 +12,9 @@
 // close to one bet, not three. So the standard error is also measured by game
 // (clustered), the larger of the two is used, and nothing is judged before it
 // spans enough separate games.
+import type { Fix } from './fixes'
 import type { PlayTags } from './signal'
-import type { Lane, Sport } from './schema'
+import { Quarter, type Lane, type Sport } from './schema'
 
 export interface SettledLike {
   botId: string
@@ -51,6 +52,8 @@ export interface Segment {
   // Win rate minus breakeven, in standard errors. |z| >= 2 is "strong".
   z: number
   verdict: 'winning' | 'losing' | 'too_early' | 'even'
+  // The bots whose trades are in this segment, so a fix goes to them.
+  botIds: string[]
 }
 
 export interface Dimension {
@@ -66,6 +69,10 @@ export interface Recommendation {
   segment: string
   text: string
   strength: 'strong' | 'leaning'
+  // For a cut: the setting change that leaves the segment out, and the bots
+  // that traded it. Missing when no setting can (side bought, hot play).
+  fix?: Fix
+  botIds: string[]
 }
 
 export const MIN_SETTLED = 20
@@ -114,7 +121,49 @@ function segment(key: string, ts: SettledLike[]): Segment {
     key, n, games, won, lost: n - won, contracts, pnlUsd, costUsd, avgPrice, winRate,
     pnlPerContractC: contracts ? (pnlUsd / contracts) * 100 : 0,
     roi: costUsd ? pnlUsd / costUsd : 0,
-    z, verdict
+    z, verdict,
+    botIds: [...new Set(ts.map((t) => t.botId))]
+  }
+}
+
+// The backed team's score when bought, in a live game.
+const SCORE_BUCKETS = { down10: 'Down 10 or more', down: 'Down 1 to 9', tied: 'Tied', up: 'Up 1 to 9', up10: 'Up 10 or more' } as const
+function scoreBucket(lead: number | null | undefined): string | null {
+  if (lead === null || lead === undefined) return null
+  return lead <= -10 ? SCORE_BUCKETS.down10 : lead < 0 ? SCORE_BUCKETS.down : lead === 0 ? SCORE_BUCKETS.tied : lead < 10 ? SCORE_BUCKETS.up : SCORE_BUCKETS.up10
+}
+
+// The setting change that leaves a losing segment out, where one exists.
+export function fixFor(dimension: string, key: string): Fix | undefined {
+  switch (dimension) {
+    case 'sport': return { kind: 'drop', field: 'sports', value: key }
+    case 'lane': return { kind: 'drop', field: 'lanes', value: key }
+    case 'label': return { kind: 'drop', field: 'labels', value: key }
+    case 'phase': return key === 'pregame' || key === 'live' ? { kind: 'dropPhase', phase: key } : undefined
+    case 'quarter':
+      if (key === 'OT') return { kind: 'noOvertime' }
+      return (Quarter.options as readonly string[]).includes(key) ? { kind: 'drop', field: 'quarters', value: key } : undefined
+    case 'price': {
+      // Only the end buckets can be cut alone: the cheapest raises the low,
+      // the dearest lowers the high. Cutting a middle bucket would take a
+      // bucket beside it too, so it has no fix.
+      const first = PRICE_BUCKETS[0]!
+      const last = PRICE_BUCKETS[PRICE_BUCKETS.length - 1]!
+      if (key === first[2]) return { kind: 'priceFloor', c: first[1] }
+      if (key === last[2]) return { kind: 'priceCeiling', c: last[0] - 1 }
+      return undefined
+    }
+    case 'edge': {
+      // Only the smallest edges, for the same reason.
+      const first = EDGE_BUCKETS[0]!
+      return key === first[2] ? { kind: 'minEdge', pp: first[1] } : undefined
+    }
+    case 'score':
+      if (key === SCORE_BUCKETS.down10) return { kind: 'maxTrailing', points: 9 }
+      if (key === SCORE_BUCKETS.down) return { kind: 'maxTrailing', points: 0 }
+      return undefined
+    case 'favorite': return key === 'Underdog' ? { kind: 'favoritesOnly' } : undefined
+    default: return undefined
   }
 }
 
@@ -127,7 +176,12 @@ const DIMENSIONS: { id: string; title: string; setting: string | null; of: (t: S
   { id: 'hot', title: 'Hot play', setting: 'Phase', of: (t) => { const h = tagsOf(t).hot; return h === undefined ? null : h ? 'Hot play' : 'Not a hot play' } },
   { id: 'side', title: 'Side bought', setting: null, of: (t) => t.side.toUpperCase() },
   { id: 'price', title: 'Price paid', setting: 'Price band', of: (t) => bucket(priceC(t), PRICE_BUCKETS) },
-  { id: 'edge', title: 'Edge at entry', setting: 'Minimum edge', of: (t) => bucket(tagsOf(t).edgePp, EDGE_BUCKETS) }
+  { id: 'edge', title: 'Edge at entry', setting: 'Minimum edge', of: (t) => bucket(tagsOf(t).edgePp, EDGE_BUCKETS) },
+  // From 0.8.0 tickets on; older ones carry none and are left out.
+  // Live quarters only: pregame is already its own row under Live or pregame.
+  { id: 'quarter', title: 'Quarter bought in', setting: 'Quarters', of: (t) => { const q = tagsOf(t).quarter; return q && q !== 'Pregame' ? q : null } },
+  { id: 'score', title: 'Score when bought', setting: 'Most points behind', of: (t) => scoreBucket(tagsOf(t).lead) },
+  { id: 'favorite', title: 'Favorite or underdog', setting: 'Favorites only', of: (t) => { const p = tagsOf(t).teamWinP; return p === null || p === undefined ? null : p >= 0.5 ? 'Favorite' : 'Underdog' } }
 ]
 
 export function settled<T extends SettledLike>(tickets: T[]): T[] {
@@ -159,10 +213,11 @@ export function analyze(tickets: SettledLike[]): { overall: Segment; dimensions:
       if (r.pnlUsd < 0 && r.z < 0) {
         recommendations.push({
           kind: 'cut', dimension: d.title, segment: r.key, strength,
-          text: `${d.title} ${r.key} lost: ${record}.${d.setting ? ` Consider leaving it out under ${d.setting}.` : ''}`
+          text: `${d.title} ${r.key} lost: ${record}.${d.setting ? ` Consider leaving it out under ${d.setting}.` : ''}`,
+          fix: fixFor(d.id, r.key), botIds: r.botIds
         })
       } else if (r.pnlUsd > 0 && r.z > 0) {
-        recommendations.push({ kind: 'keep', dimension: d.title, segment: r.key, strength, text: `${d.title} ${r.key} won: ${record}.` })
+        recommendations.push({ kind: 'keep', dimension: d.title, segment: r.key, strength, text: `${d.title} ${r.key} won: ${record}.`, botIds: r.botIds })
       }
     }
   }

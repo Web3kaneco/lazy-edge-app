@@ -16,6 +16,7 @@ export const Quarter = z.enum(['Q1', 'Q2', 'Q3', 'Q4'])
 // reaches entry + target.
 export const ExitMode = z.enum(['hold', 'limit', 'mark'])
 const chance = z.number().min(0).max(99)
+const trailing = z.number().int().min(0).max(60).nullable()
 export const VenueId = z.enum(['paper', 'kalshi', 'polymarket'])
 export const ProviderId = z.enum(['anthropic', 'openai', 'xai', 'ollama'])
 
@@ -104,7 +105,16 @@ export const BotSettings = z.object({
     // The lowest chance, in percent, that the contract bought pays out, before
     // the game and in each quarter. 0 means no minimum. Overtime uses Q4's.
     minChancePct: z.object({ pregame: chance, Q1: chance, Q2: chance, Q3: chance, Q4: chance })
-      .default({ pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 })
+      .default({ pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 }),
+    // Moneyline and spread plays (2026-11-17). The most points the team a
+    // live play backs may trail by, in each quarter; null is no limit and 0
+    // means never a team that is behind. Overtime uses Q4's. Read only where
+    // the feed carries the score (NBA); with a limit set, a play whose score
+    // cannot be read is refused.
+    maxTrailing: z.object({ Q1: trailing, Q2: trailing, Q3: trailing, Q4: trailing })
+      .default({ Q1: null, Q2: null, Q3: null, Q4: null }),
+    // Only back the team the market prices at 50% or more to win the game.
+    favoritesOnly: z.boolean().default(false)
   }),
 
   size: z.object({

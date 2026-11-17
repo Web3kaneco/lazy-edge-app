@@ -186,6 +186,25 @@ export function Bots() {
               </div>
               <span className="hint">0 means no minimum. Overtime uses Q4.</span>
             </div>
+            {(edit.market.lanes.includes('MONEYLINE') || edit.market.lanes.includes('SPREAD')) && (
+              <>
+                {edit.market.phase !== 'pregame' && (
+                  <div className="field" style={{ marginTop: 12 }}>
+                    <label>Most points behind<Tip text={tip('Most points behind')} /></label>
+                    <div className="grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+                      {Quarter.options.map((k) => (
+                        <NumberField key={k} label={k} suffix="points" step={1} min={0} max={60} value={edit.entry.maxTrailing[k] ?? NaN}
+                          onChange={(v) => set((b) => { b.entry.maxTrailing[k] = Number.isFinite(v) ? Math.min(60, Math.max(0, Math.round(v))) : null })} />
+                      ))}
+                    </div>
+                    <span className="hint">Empty means no limit; 0 means never back a team that is behind. Moneyline and spread plays, NBA only for now. Overtime uses Q4.</span>
+                  </div>
+                )}
+                <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>
+                  <Toggle on={edit.entry.favoritesOnly} onChange={(v) => set((b) => { b.entry.favoritesOnly = v })} label={<>Favorites only<Tip text={tip('Favorites only')} /></>} />
+                </div>
+              </>
+            )}
 
             <div className="section">Size</div>
             <div className="grid cols-2">

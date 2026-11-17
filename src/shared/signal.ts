@@ -1,6 +1,6 @@
 // One shape for every opportunity the API publishes, whatever the sport or
 // lane. src/main/data/normalize.ts builds these; the gates read only these.
-import type { Lane, Sport, VenueId } from './schema'
+import type { Lane, Quarter, Sport, VenueId } from './schema'
 
 export type ContractSide = 'yes' | 'no'
 
@@ -54,6 +54,29 @@ export interface Signal {
   matchup?: string | null
   // From /v1/nfl/live-plays, the API's hot plays rule.
   hot?: boolean
+  // The team a moneyline or spread play backs (2026-11-17). lead is its
+  // points ahead from the feed's score, negative when it trails; winP is the
+  // market's chance it wins the game. Either is null when the feed gives
+  // none, and the field is missing where the feed carries no score.
+  team?: { lead: number | null; winP: number | null }
+}
+
+// A play that backs one team to win or cover.
+export const isTeamPlay = (s: Pick<Signal, 'lane'>): boolean => s.lane === 'MONEYLINE' || s.lane === 'SPREAD'
+
+// The market's chance that the team a play backs wins the game. A moneyline's
+// own market price is exactly that; a spread needs the game's moneyline.
+export function teamWinP(s: Pick<Signal, 'lane' | 'marketP' | 'team'>): number | null {
+  if (!isTeamPlay(s)) return null
+  return s.team?.winP ?? (s.lane === 'MONEYLINE' ? s.marketP : null)
+}
+
+// The quarter a live play is in: Q1 to Q4, OT past the fourth, null when the
+// feed gives no period.
+export function quarterOf(signal: Pick<Signal, 'clock'>): Quarter | 'OT' | null {
+  const p = signal.clock?.period
+  if (signal.clock?.overtime || (p !== null && p !== undefined && p > 4)) return 'OT'
+  return p === 1 || p === 2 || p === 3 || p === 4 ? (`Q${p}` as Quarter) : null
 }
 
 // The strategy facts saved on every ticket, so results can be broken down by
@@ -68,10 +91,22 @@ export interface PlayTags {
   measured: boolean
   edgePp: number | null
   ourP: number | null
+  // From 0.8.0: where the game stood. quarter is Pregame, Q1 to Q4 or OT;
+  // lead is the backed team's points ahead in a live game; teamWinP the
+  // market's chance that team wins. Null where it does not apply or the feed
+  // gave none; missing on older tickets.
+  quarter?: Quarter | 'OT' | 'Pregame' | null
+  lead?: number | null
+  teamWinP?: number | null
 }
 
 export function playTags(s: Signal): PlayTags {
-  return { sport: s.sport, lane: s.lane, phase: s.phase, label: s.label, hot: Boolean(s.hot), measured: s.measured, edgePp: s.edgePp, ourP: s.ourP }
+  return {
+    sport: s.sport, lane: s.lane, phase: s.phase, label: s.label, hot: Boolean(s.hot), measured: s.measured, edgePp: s.edgePp, ourP: s.ourP,
+    quarter: s.phase === 'pregame' ? 'Pregame' : quarterOf(s),
+    lead: s.phase === 'live' && isTeamPlay(s) ? s.team?.lead ?? null : null,
+    teamWinP: teamWinP(s)
+  }
 }
 
 // What one bot would do with one signal this cycle. Bots that are switched

@@ -22,6 +22,9 @@ const Draft = z.object({
   minChanceQ2Pct: z.number(),
   minChanceQ3Pct: z.number(),
   minChanceQ4Pct: z.number(),
+  // The most points a backed team may trail by, every quarter; -1 is no limit.
+  maxTrailingPoints: z.number(),
+  favoritesOnly: z.boolean(),
   exitMode: ExitMode,
   exitTargetC: z.number(),
   minEvCents: z.number(),
@@ -59,7 +62,7 @@ Rules:
 2. Every default was measured on real fills. If the description asks for something looser than a default, set what they asked and say in the explanation which measured lesson that relaxes.
 3. You only fill settings. You never decide trades, never predict outcomes, and never describe anything as a recommendation.
 4. If the description asks for something these settings cannot express, leave the settings at their defaults for it and list it in unsupported, in the trader's own words.
-5. Probabilities are in probability points (5 means 5pp). Prices are in cents. Money is in dollars.
+5. Probabilities are in probability points (5 means 5pp). Prices are in cents. Money is in dollars. maxTrailingPoints is the most points a team the bot backs may be behind in a live game, every quarter, and -1 means no limit; favoritesOnly backs only the team the market prices to win.
 6. Write the explanation as two or three plain sentences.
 
 Ruleset ${RULESET_VERSION}. Measured defaults:
@@ -99,7 +102,12 @@ export async function draftStrategy(provider: AiProvider, sentence: string, guid
     maxPriceAgeS: Math.round(d.maxPriceAgeS),
     requireTrigger: d.requireTrigger,
     measuredOnly: d.measuredOnly,
-    minChancePct: { pregame: d.minChancePregamePct, Q1: d.minChanceQ1Pct, Q2: d.minChanceQ2Pct, Q3: d.minChanceQ3Pct, Q4: d.minChanceQ4Pct }
+    minChancePct: { pregame: d.minChancePregamePct, Q1: d.minChanceQ1Pct, Q2: d.minChanceQ2Pct, Q3: d.minChanceQ3Pct, Q4: d.minChanceQ4Pct },
+    maxTrailing: (() => {
+      const n = d.maxTrailingPoints < 0 ? null : Math.round(d.maxTrailingPoints)
+      return { Q1: n, Q2: n, Q3: n, Q4: n }
+    })(),
+    favoritesOnly: d.favoritesOnly
   }
   bot.exit = { mode: d.exitMode, targetC: Math.round(d.exitTargetC) }
   bot.size = {

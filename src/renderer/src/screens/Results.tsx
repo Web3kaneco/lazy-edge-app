@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { PRINT_WINDOW_S, summarize } from '@shared/accuracy'
+import { applyFix, fixText, undoFix, type Fix } from '@shared/fixes'
 import { analyze, MIN_GAMES, MIN_SETTLED, settled, type Segment } from '@shared/results'
+import type { BotSettings } from '@shared/schema'
+import { diffSettings } from '@shared/share'
 import { ago, api, usd, type AccuracyState, type Ticket } from '../api'
 import { Tip } from '../ui'
 
@@ -23,6 +26,10 @@ export function Results() {
   const [fills, setFills] = useState<'all' | 'proven'>('all')
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [acc, setAcc] = useState<AccuracyState | null>(null)
+  const [allBots, setAllBots] = useState<BotSettings[]>([])
+  const [fixing, setFixing] = useState<string | null>(null)
+  const reloadBots = (): void => { void api.bots().then(setAllBots) }
+  useEffect(reloadBots, [])
 
   useEffect(() => {
     void api.tickets(days).then(setTickets)
@@ -98,15 +105,22 @@ export function Results() {
         <h2>Recommendations</h2>
         {recommendations.length ? (
           <>
-            {recommendations.map((r, i) => (
-              <div key={i} className="help-term" style={{ gridTemplateColumns: '110px 1fr' }}>
-                <span className={`pill ${r.kind === 'cut' ? 'live' : ''}`} style={r.kind === 'keep' ? { color: 'var(--good)', borderColor: 'rgba(0,200,83,.45)' } : undefined}>
-                  {r.kind === 'cut' ? 'Cut' : 'Keep'} · {r.strength}
-                </span>
-                <span>{r.text}</span>
-              </div>
-            ))}
-            <p className="small muted" style={{ marginBottom: 0 }}>These describe your own past trades, not what will happen next. Strong means the record is two or more standard errors from breakeven; leaning means one. A change you make is saved to the bot as usual and shows in amber against the measured default.</p>
+            {recommendations.map((r, i) => {
+              const key = `${r.dimension}:${r.segment}`
+              return (
+                <div key={i}>
+                  <div className="help-term" style={{ gridTemplateColumns: '110px 1fr auto' }}>
+                    <span className={`pill ${r.kind === 'cut' ? 'live' : ''}`} style={r.kind === 'keep' ? { color: 'var(--good)', borderColor: 'rgba(0,200,83,.45)' } : undefined}>
+                      {r.kind === 'cut' ? 'Cut' : 'Keep'} · {r.strength}
+                    </span>
+                    <span>{r.text}</span>
+                    {r.fix ? <button className="btn" onClick={() => setFixing(fixing === key ? null : key)}>{fixing === key ? 'Close' : 'Fix this'}</button> : <span />}
+                  </div>
+                  {r.fix && fixing === key && <ApplyFix fix={r.fix} traded={r.botIds} bots={allBots} onDone={reloadBots} />}
+                </div>
+              )
+            })}
+            <p className="small muted" style={{ marginBottom: 0 }}>These describe your own past trades, not what will happen next. Strong means the record is two or more standard errors from breakeven; leaning means one. Fix this shows each bot's exact change before anything is saved; a fix only ever narrows what a bot trades, and every change is written to the ledger and can be undone.</p>
           </>
         ) : (
           <p className="muted" style={{ margin: 0 }}>
@@ -143,6 +157,92 @@ export function Results() {
       </div>
       {!n && <p className="muted">Nothing has settled in this window yet. Results appear here as games finish and the venue settles each market.</p>}
     </>
+  )
+}
+
+const show = (v: unknown): string => v === null || v === undefined ? 'none' : Array.isArray(v) ? v.join(', ') : String(v)
+
+// The fix, bot by bot: what each one would change, ticked by default for the
+// bots that made the trades. Nothing is saved until Apply.
+function ApplyFix({ fix, traded, bots, onDone }: { fix: Fix; traded: string[]; bots: BotSettings[]; onDone: () => void }) {
+  const [others, setOthers] = useState(false)
+  const [off, setOff] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [done, setDone] = useState<{ changed: string[]; skipped: { name: string; why: string }[]; before: BotSettings[] } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [undone, setUndone] = useState<string | null>(null)
+
+  const rows = bots
+    .filter((b) => others || traded.includes(b.id))
+    .map((b) => ({ bot: b, ...applyFix(b, fix) }))
+  const ready = rows.filter((r) => r.next && !off.has(r.bot.id))
+  const otherCount = bots.filter((b) => !traded.includes(b.id) && applyFix(b, fix).next).length
+
+  const apply = async (): Promise<void> => {
+    setBusy(true); setError(null)
+    try { setUndone(null); setDone(await api.applyFix(fix, ready.map((r) => r.bot.id))); onDone() } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+  const undo = async (): Promise<void> => {
+    if (!done) return
+    setBusy(true); setError(null)
+    try {
+      // Only the fields the fix moved go back; a bot switched off since stays off.
+      const now = await api.bots()
+      const kept: string[] = []
+      for (const b of done.before) {
+        const cur = now.find((x) => x.id === b.id)
+        const back = cur && undoFix(b, cur, fix)
+        if (back) await api.saveBot(back)
+        else kept.push(b.name)
+      }
+      setUndone(kept.length
+        ? `Undone, except ${kept.join(', ')}: changed again since, so left as it is now.`
+        : 'Undone.')
+      setDone(null); onDone()
+    } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="card" style={{ margin: '6px 0 12px 110px', padding: 12 }}>
+      <div style={{ fontWeight: 600, marginBottom: 8 }}>{fixText(fix)}</div>
+      {done ? (
+        <>
+          <div className="small good">{done.changed.length ? `Saved to ${done.changed.join(', ')}.` : 'Nothing changed.'}</div>
+          {done.skipped.map((s) => <div key={s.name} className="small muted">{s.name}: not changed, {s.why}.</div>)}
+          {done.before.length > 0 && <button className="btn" style={{ marginTop: 8 }} disabled={busy} onClick={() => void undo()}>{busy ? 'Undoing…' : 'Undo'}</button>}
+        </>
+      ) : (
+        <>
+          {rows.length === 0 && <div className="small muted">None of the bots that made these trades still exist.</div>}
+          {rows.map(({ bot, next, why }) => (
+            <div key={bot.id} className="small" style={{ marginBottom: 6 }}>
+              {next ? (
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!off.has(bot.id)} onChange={(e) => setOff((s) => { const n = new Set(s); if (e.target.checked) n.delete(bot.id); else n.add(bot.id); return n })} />
+                  <span>
+                    <b>{bot.name}</b> <span className="muted">{bot.mode}{bot.enabled ? ', on' : ', off'}{traded.includes(bot.id) ? '' : ', did not make these trades'}</span>
+                    {diffSettings(bot, next).map((c) => <div key={c.field} className="muted">{c.field}: {show(c.from)} → {show(c.to)}</div>)}
+                  </span>
+                </label>
+              ) : (
+                <span className="muted"><b>{bot.name}</b>: no change, {why}.</span>
+              )}
+            </div>
+          ))}
+          {otherCount > 0 && (
+            <label className="small" style={{ display: 'flex', gap: 8, marginTop: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={others} onChange={(e) => setOthers(e.target.checked)} />
+              Also show the {otherCount} other {otherCount === 1 ? 'bot' : 'bots'} this would change
+            </label>
+          )}
+          <button className="btn primary" style={{ marginTop: 10 }} disabled={busy || !ready.length} onClick={() => void apply()}>
+            {busy ? 'Saving…' : `Apply to ${ready.length} ${ready.length === 1 ? 'bot' : 'bots'}`}
+          </button>
+        </>
+      )}
+      {undone && !done && <div className="small muted" style={{ marginTop: 6 }}>{undone}</div>}
+      {error && <div className="small bad" style={{ marginTop: 6 }}>{error}</div>}
+    </div>
   )
 }
 

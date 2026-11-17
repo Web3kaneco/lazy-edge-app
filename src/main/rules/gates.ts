@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto'
 import { tradingDay } from '@shared/day'
 import { NEVER_TRADE_LABELS, type AccountSettings, type BotSettings, type Quarter, type VenueId } from '@shared/schema'
-import type { ContractSide, Signal, VenueQuote } from '@shared/signal'
+import { isTeamPlay, quarterOf, teamWinP, type ContractSide, type Signal, type VenueQuote } from '@shared/signal'
 import { breakevenProb, evCents } from './fees'
 import { resolveSide } from './side'
 import { opposedBy, type Position } from './stance'
@@ -122,6 +122,27 @@ export function preGates(signal: Signal, bot: BotSettings, account: AccountSetti
     if (signal.ourP * 100 < need) return skip('min_chance', `${(signal.ourP * 100).toFixed(1)}% < ${need}%`)
   }
 
+  // 5c. Where the game stands, for plays that back a team (2026-11-17): only
+  // the team the market prices to win, and never a team further behind than
+  // the user allows in this quarter. A rule that is on and cannot be read
+  // refuses the play rather than guessing.
+  if (isTeamPlay(signal)) {
+    if (bot.entry.favoritesOnly) {
+      const p = teamWinP(signal)
+      if (p === null) return skip('favorite_unknown')
+      if (p < 0.5) return skip('not_favorite', `${(p * 100).toFixed(0)}% to win`)
+    }
+    // The score limit reads NBA only, the one feed that carries the score; an
+    // NBA play whose score is missing is refused, other sports are not held
+    // to a score they never publish.
+    const most = signal.sport === 'NBA' ? maxTrailingFor(signal, bot) : null
+    if (most !== null) {
+      const lead = signal.team?.lead ?? null
+      if (lead === null) return skip('score_unknown')
+      if (-lead > most) return skip('trailing', `down ${-lead}, most allowed ${most}`)
+    }
+  }
+
   // 6. Position and pace limits.
   // A market is the contract, on either side, whichever row priced it: a
   // board row and a hot play on one ticker are one position.
@@ -144,12 +165,16 @@ export function preGates(signal: Signal, bot: BotSettings, account: AccountSetti
   return null
 }
 
-// The quarter a live play is in: Q1 to Q4, OT past the fourth, null when the
-// feed gives no period.
-export function quarterOf(signal: Pick<Signal, 'clock'>): Quarter | 'OT' | null {
-  const p = signal.clock?.period
-  if (signal.clock?.overtime || (p !== null && p !== undefined && p > 4)) return 'OT'
-  return p === 1 || p === 2 || p === 3 || p === 4 ? (`Q${p}` as Quarter) : null
+export { quarterOf }
+
+// The most points behind a backed team may be at this point of a live game,
+// or null for no limit. Pregame plays have no score to read. Overtime uses
+// Q4's.
+export function maxTrailingFor(signal: Pick<Signal, 'phase' | 'clock'>, bot: BotSettings): number | null {
+  if (signal.phase !== 'live') return null
+  const q = quarterOf(signal)
+  const m = bot.entry.maxTrailing
+  return q === 'OT' ? m.Q4 : q ? m[q] : null
 }
 
 export function minChanceFor(signal: Pick<Signal, 'phase' | 'clock'>, bot: BotSettings): number {

@@ -9,6 +9,7 @@ import { defaultBot } from '@shared/ruleset'
 import { AccountSettings, type BotSettings, type ProviderId } from '@shared/schema'
 import { STARTERS } from '@shared/starters'
 import type { CashOutResult } from '@shared/exits'
+import { applyFix, Fix, fixText } from '@shared/fixes'
 import { changeNote, exportFiles, paperTestPlan, settingsChanges } from '@shared/testdata'
 import { draftStrategy } from './ai/strategy'
 import { ai, allProviders } from './ai/registry'
@@ -241,6 +242,26 @@ function registerIpc(): void {
     const gone = settingsStore.bots().find((b) => b.id === String(id))
     settingsStore.deleteBot(String(id))
     if (gone) note(gone.id, `${gone.name}: deleted`)
+  })
+  // A Results fix, applied to the bots the user ticked. A fix only narrows
+  // what a bot may trade, so it needs no native confirm; each save is logged
+  // with the change, and the bots as they were go back for undo.
+  handle('results:apply', (doc: unknown, ids: unknown) => {
+    const fix = Fix.parse(doc)
+    const want = new Set(Array.isArray(ids) ? ids.map(String) : [])
+    const changed: string[] = []
+    const skipped: { name: string; why: string }[] = []
+    const before: BotSettings[] = []
+    for (const bot of settingsStore.bots().filter((b) => want.has(b.id))) {
+      const { next, why } = applyFix(bot, fix)
+      if (!next) { skipped.push({ name: bot.name, why }); continue }
+      before.push(bot)
+      note(bot.id, `${bot.name}: from Results, ${fixText(fix)}`)
+      saveLogged(next)
+      changed.push(bot.name)
+    }
+    supervisor.restartTimer()
+    return { changed, skipped, before }
   })
   // Every paper bot switched on, and any starter not in the list added, the
   // way a user would do it by hand. Live bots are never touched.

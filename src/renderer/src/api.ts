@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import type { AccuracyEntry } from '@shared/accuracy'
 import type { CashOutResult } from '@shared/exits'
+import type { Fix } from '@shared/fixes'
 import type { LockState } from '@shared/profitlock'
 import type { HeldBack } from '@shared/limits'
 import type { NoticesState } from '@shared/notices'
@@ -74,6 +75,9 @@ export const api = {
   paperTest: (maxTradeUsd: number | null) => c<{ on: number; live: string[] }>('bots:paperTest', maxTradeUsd),
   paperStop: () => c<{ off: number }>('bots:paperStop'),
   exportTest: (days: number) => c<string | null>('test:export', days),
+  // Applies a Results fix to the bots named; before holds each bot as it was,
+  // for undo.
+  applyFix: (fix: Fix, botIds: string[]) => c<{ changed: string[]; skipped: { name: string; why: string }[]; before: BotSettings[] }>('results:apply', fix, botIds),
   copy: (text: string) => c('clipboard:write', text),
   draft: (sentence: string, provider: ProviderId, model?: string) => c<StrategyResult>('bots:draft', sentence, provider, model),
   tickets: (days = 7) => c<Ticket[]>('ledger:tickets', days),
