@@ -57,7 +57,8 @@ export function defaultBot(id: string, name: string): BotSettings {
       measuredOnly: false,
       minChancePct: { pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 },
       maxTrailing: { Q1: null, Q2: null, Q3: null, Q4: null },
-      favoritesOnly: false
+      favoritesOnly: false,
+      basis: 'edge'
     },
     size: {
       kellyMultiplier: 0.25, // the strategy plan's kelly_fraction default
@@ -65,7 +66,8 @@ export function defaultBot(id: string, name: string): BotSettings {
       maxTradeUsd: 10, // MLB_MAX_TRADE_USD
       minTradeUsd: 1, // MLB_MIN_TRADE_USD
       maxContracts: 100,
-      maxGameEquityPct: 0.35 // MLB_MAX_GAME_EQUITY_PCT, the 255 contract weeks
+      maxGameEquityPct: 0.35, // MLB_MAX_GAME_EQUITY_PCT, the 255 contract weeks
+      sizing: 'kelly'
     },
     // Held to settlement until the user picks an exit; +10c is John's scalp.
     exit: { mode: 'hold', targetC: 10 },

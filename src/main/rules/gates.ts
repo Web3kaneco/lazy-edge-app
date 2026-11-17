@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto'
 import { tradingDay } from '@shared/day'
 import { NEVER_TRADE_LABELS, type AccountSettings, type BotSettings, type Quarter, type VenueId } from '@shared/schema'
-import { isTeamPlay, quarterOf, teamWinP, type ContractSide, type Signal, type VenueQuote } from '@shared/signal'
+import { isOurPick, isTeamPlay, quarterOf, teamWinP, type ContractSide, type Signal, type VenueQuote } from '@shared/signal'
 import { breakevenProb, evCents } from './fees'
 import { resolveSide } from './side'
 import { opposedBy, type Position } from './stance'
@@ -113,6 +113,15 @@ export function preGates(signal: Signal, bot: BotSettings, account: AccountSetti
     if (q !== 'OT' && !bot.market.quarters.includes(q)) return skip('quarter_not_enabled', q)
   }
 
+  // 4b. What the trade is chosen on. A pick signal exists only for a bot that
+  // buys our pick, and such a bot never buys the side our number has losing.
+  const pick = bot.entry.basis === 'pick'
+  if (signal.pickOnly && !pick) return skip('pick_only')
+  if (pick) {
+    if (signal.ourP === null) return skip('no_reading')
+    if (!isOurPick(signal)) return skip('not_our_pick', `${(signal.ourP * 100).toFixed(1)}% to pay out`)
+  }
+
   // 5b. The chance the contract pays out, against the minimum for this point
   // of the game. It needs only our number, so no book is read for a play
   // that could never pass.
@@ -193,11 +202,14 @@ export function evaluate(signal: Signal, bot: BotSettings, account: AccountSetti
 
   // 7. A null edge is no reading, never zero (agent guide, rule 1). Read
   // after the live requote, so it is the edge at the price that can be paid.
-  if (signal.edgePp === null || signal.ourP === null) return skip('no_reading')
+  // A bot buying our pick does not use the edge, only our number.
+  const pick = bot.entry.basis === 'pick'
+  if (signal.ourP === null || (!pick && signal.edgePp === null)) return skip('no_reading')
   // Signed: a negative edge means the market already prices it above ours.
-  if (signal.edgePp < bot.entry.minEdgePp) {
-    return skip('min_edge', `${signal.edgePp.toFixed(2)}pp < ${bot.entry.minEdgePp}pp`)
+  if (!pick && signal.edgePp! < bot.entry.minEdgePp) {
+    return skip('min_edge', `${signal.edgePp!.toFixed(2)}pp < ${bot.entry.minEdgePp}pp`)
   }
+  if (pick) audit.push(`basis our pick at ${(signal.ourP * 100).toFixed(1)}%, edge ${signal.edgePp === null ? 'unknown' : `${signal.edgePp.toFixed(1)}pp`} not used`)
 
   // 8. Route. Best EV after each venue's own fee, among venues the bot allows,
   // the account enabled, and (when live) the user actually funded.
@@ -206,22 +218,28 @@ export function evaluate(signal: Signal, bot: BotSettings, account: AccountSetti
   const { quote, pCal, ev } = best
   audit.push(`route ${quote.venue} ask ${(quote.ask * 100).toFixed(0)}c age ${quote.priceAgeS}s ev ${ev.toFixed(2)}c`)
 
-  // 9. Size. Kelly against a real bankroll, then the rails, then the band.
+  // 9. Size. Kelly against a real bankroll, then the rails, then the band;
+  // or flat, the largest trade amount every time.
   const venue: VenueId = live ? quote.venue : 'paper'
   const state = ctx.venues[venue]
   const bankroll = bot.size.bankrollUsd > 0 ? bot.size.bankrollUsd : (state?.balanceUsd ?? 0)
   if (bankroll <= 0) return skip('no_bankroll', venue)
-  // The API's own Kelly when it publishes one; otherwise binary Kelly on the
-  // calibrated probability at the price we would pay: (p - c) / (1 - c).
-  const rawKelly = signal.kelly ?? (pCal - quote.ask) / (1 - quote.ask)
-  const kelly = Math.max(0, Math.min(rawKelly * bot.size.kellyMultiplier, 1))
-  if (kelly <= 0) return skip('kelly_zero', rawKelly.toFixed(4))
-
-  let sizeUsd = Math.min(kelly * bankroll, bot.size.maxTradeUsd)
-  const kellyUsd = sizeUsd
-  if (sizeUsd > 0 && sizeUsd < bot.size.minTradeUsd) sizeUsd = Math.min(bot.size.minTradeUsd, bot.size.maxTradeUsd)
+  let sizeUsd: number
+  let wantUsd: number
+  if (bot.size.sizing === 'flat') {
+    sizeUsd = wantUsd = Math.min(bot.size.maxTradeUsd, bankroll)
+    audit.push(`size flat $${sizeUsd.toFixed(2)}`)
+  } else {
+    // The API's own Kelly when it publishes one; otherwise binary Kelly on the
+    // calibrated probability at the price we would pay: (p - c) / (1 - c).
+    const rawKelly = signal.kelly ?? (pCal - quote.ask) / (1 - quote.ask)
+    const kelly = Math.max(0, Math.min(rawKelly * bot.size.kellyMultiplier, 1))
+    if (kelly <= 0) return skip('kelly_zero', rawKelly.toFixed(4))
+    sizeUsd = wantUsd = Math.min(kelly * bankroll, bot.size.maxTradeUsd)
+    if (sizeUsd > 0 && sizeUsd < bot.size.minTradeUsd) sizeUsd = Math.min(bot.size.minTradeUsd, bot.size.maxTradeUsd)
+  }
   if (state?.balanceUsd !== null && state?.balanceUsd !== undefined) sizeUsd = Math.min(sizeUsd, state.balanceUsd)
-  if (Math.abs(sizeUsd - kellyUsd) > 0.005) audit.push(`size band: kelly $${kellyUsd.toFixed(2)} -> $${sizeUsd.toFixed(2)}`)
+  if (Math.abs(sizeUsd - wantUsd) > 0.005) audit.push(`size band: ${bot.size.sizing} $${wantUsd.toFixed(2)} -> $${sizeUsd.toFixed(2)}`)
 
   const limitPriceC = Math.round(quote.ask * 100)
   const contracts = Math.min(Math.floor((sizeUsd * 100) / limitPriceC), bot.size.maxContracts)
@@ -290,14 +308,16 @@ function route(
     const [lo, hi] = bot.entry.priceBandC
     if (askC < lo || askC > hi) { reasons.push(`${q.venue}:band ${askC.toFixed(0)}c`); continue }
     // The minimum edge holds on the venue that would be traded, not only on
-    // the best price anywhere.
+    // the best price anywhere. A bot buying our pick uses neither minimum;
+    // its EV is still worked out, for the record and to pick the venue.
+    const pick = bot.entry.basis === 'pick'
     const edgePp = (signal.ourP! - q.ask) * 100
-    if (edgePp < bot.entry.minEdgePp) { reasons.push(`${q.venue}:edge ${edgePp.toFixed(1)}pp`); continue }
+    if (!pick && edgePp < bot.entry.minEdgePp) { reasons.push(`${q.venue}:edge ${edgePp.toFixed(1)}pp`); continue }
 
     // The measured overconfidence haircut, then net EV after this venue's fee.
     const pCal = q.ask + (signal.ourP! - q.ask) * bot.entry.edgeHaircut
     const ev = evCents(pCal, q.ask, q.venue, q.feeRate)
-    if (ev < bot.entry.minEvCents) { reasons.push(`${q.venue}:ev ${ev.toFixed(2)}c`); continue }
+    if (!pick && ev < bot.entry.minEvCents) { reasons.push(`${q.venue}:ev ${ev.toFixed(2)}c`); continue }
     if (!best || ev > best.ev) best = { quote: { ...q, ask: q.ask }, pCal, ev }
   }
 

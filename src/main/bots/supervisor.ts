@@ -20,7 +20,7 @@ import { screen, type Candidate } from '../ai/agent'
 import { accuracy } from './accuracy'
 import { ai } from '../ai/registry'
 import { lazyedge, NotSignedInError, PlanInactiveError } from '../data/lazyedge'
-import { matchupOf, mlbEdges, nflBoardPhase, nbaLiveEdges, nbaProps, nbaRowProblem, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, type NflMarketMap, type Normalized } from '../data/normalize'
+import { matchupOf, mlbEdges, nflBoardPhase, nbaLiveEdges, nbaPicks, nbaProps, nbaRowProblem, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, type NflMarketMap, type Normalized } from '../data/normalize'
 import { evaluate, preGates, type GateContext, type TradeDecision, type VenueState } from '../rules/gates'
 import type { Position } from '../rules/stance'
 import { isOpen, ledger, type Ticket } from '../store/ledger'
@@ -70,7 +70,7 @@ const REQUOTE_CONCURRENCY = 6
 const REQUOTE_SPACING_MS = 70
 // Gates that only restate a bot's own settings. The Board shows them live;
 // writing one ledger line per spread rung for them was 96% of the ledger.
-const SETTINGS_GATES = new Set(['sport_not_enabled', 'lane_not_enabled', 'phase_not_enabled', 'label_not_enabled', 'label_never_traded', 'not_measured', 'no_trigger', 'quarter_not_enabled'])
+const SETTINGS_GATES = new Set(['sport_not_enabled', 'lane_not_enabled', 'phase_not_enabled', 'label_not_enabled', 'label_never_traded', 'not_measured', 'no_trigger', 'quarter_not_enabled', 'pick_only', 'not_our_pick'])
 // A bot is due a little early rather than a whole cycle late when the timer
 // and its Poll every line up.
 const POLL_SLACK_MS = 2000
@@ -380,6 +380,22 @@ export class Supervisor extends EventEmitter {
     if (sports.has('NBA')) {
       const live = await lazyedge.nbaLive()
       add(nbaLiveEdges(live, now))
+      // A bot that buys our pick reads /v1/nba/picks. If that cannot be read,
+      // the picks are built from the live feed's own rows instead, and the
+      // reason shows as refused. A pick on a contract the edge feed already
+      // carries is that same signal, so it is not added twice.
+      if (bots.some((b) => b.entry.basis === 'pick' && b.market.sports.includes('NBA'))) {
+        let picks: Normalized
+        try {
+          picks = nbaPicks(await lazyedge.nbaPicks(), now)
+        } catch (err) {
+          out.refused.push({ source: 'nba.picks', reason: `${(err as Error).message.slice(0, 80)}; picks built from the live feed` })
+          const built = nbaLiveEdges(live, now, true)
+          picks = { refused: [], signals: built.signals.filter((s) => s.pickOnly) }
+        }
+        const have = new Set(out.signals.map((s) => s.key))
+        add({ refused: picks.refused, signals: picks.signals.filter((s) => !have.has(s.key)) })
+      }
       const wantSpreads = browsing || bots.some((b) => b.market.sports.includes('NBA') && b.market.lanes.includes('SPREAD'))
       for (const row of wantSpreads && Array.isArray(live) ? live : []) {
         // A stale game's ladder is priced off a stale margin; skip the call.
@@ -475,6 +491,9 @@ export class Supervisor extends EventEmitter {
     for (const raw of signals) {
       if (!bot.market.sports.includes(raw.sport) || !bot.market.lanes.includes(raw.lane)) continue
       if (bot.market.phase !== 'both' && bot.market.phase !== raw.phase) continue
+      // A pick signal is not a play for a bot that trades on the edge, any more
+      // than another sport is.
+      if (raw.pickOnly && bot.entry.basis !== 'pick') continue
       if (!raw.quotes.length) { skip(raw, 'no_venue', 'no contract on this signal'); continue }
       if (bot.guards.onePositionPerMarket && (openKeys.has(raw.key) || raw.quotes.some((q) => openKeys.has(q.contract)))) { verdict(raw, 'holding', null, 'already holds this market'); continue }
       const pre = preGates(raw, asIf, account, this.context(bot, raw, mine, tickets, venues, openKeys))

@@ -65,24 +65,8 @@ export function Bots() {
       <p className="lede">Each bot is a settings document. The engine follows it exactly and refuses anything it does not recognise. Every number shows its measured default; an amber hint means you have moved off what was measured. Hover any ? for what a setting means, or open Help for every term.</p>
       <div className="split">
         <div className="grid" style={{ alignContent: 'start', gap: 14 }}>
-        <div className="card">
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-            <h2 style={{ margin: 0 }}>Your bots</h2>
-            <button className="btn primary" onClick={create}>New bot</button>
-          </div>
-          {bots.map((b) => (
-            <div key={b.id} className={`list-item ${edit?.id === b.id ? 'on' : ''}`} onClick={() => { if (!dirty || confirm('Discard unsaved changes?')) { setEdit(structuredClone(b)); setDirty(false) } }}>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <strong>{b.name}</strong>
-                <span onClick={(e) => e.stopPropagation()}><Toggle on={b.enabled} onChange={(v) => void toggle(b, v)} /></span>
-              </div>
-              <div className="small muted">
-                <span className={b.mode === 'live' ? 'bad' : ''}>{b.mode}</span> · {b.market.sports.join('/')} · {b.decider.kind}{starterOf(b.id) ? ' · starter' : ''}
-              </div>
-            </div>
-          ))}
-          {!bots.length && <p className="muted small">No bots yet.</p>}
-        </div>
+        <BotList bots={bots} selected={edit?.id ?? null} onCreate={create} onToggle={(b, v) => void toggle(b, v)}
+          onSelect={(b) => { if (!dirty || confirm('Discard unsaved changes?')) { setEdit(structuredClone(b)); setDirty(false) } }} />
         <PaperTest onDone={() => load(edit?.id)} />
         <Starters have={new Set(bots.map((b) => b.id))} onAdd={async (b) => { await api.saveBot(b); await load(b.id) }} />
         <Import onAdd={async (b) => {
@@ -165,8 +149,22 @@ export function Bots() {
 
             <div className="section">Entry</div>
             <div className="grid cols-2">
-              <NumberField label="Minimum edge" tip={`${tip('Minimum edge')} ${tip('Edge (pp)')}`} suffix="pp" step={0.5} value={edit.entry.minEdgePp} measured={M.entry.minEdgePp} why="UserConfig.min_edge_threshold." onChange={(v) => set((b) => { b.entry.minEdgePp = v })} />
-              <NumberField label="Minimum EV after fees" tip={tip('EV after fees')} suffix="cents" step={0.1} value={edit.entry.minEvCents} measured={M.entry.minEvCents} why="Replaced price caps on 2026-08-31." onChange={(v) => set((b) => { b.entry.minEvCents = v })} />
+              <Field label="Buy on" tip={tip('Buy on')} hint={edit.entry.basis === 'pick'
+                ? 'Buys only the side our number has winning, at the minimum chance below and inside the price band. The minimum edge and EV are not used. NBA moneylines get a pick on every game.'
+                : 'Buys where our chance beats the price by the minimum edge and EV.'}>
+                <select value={edit.entry.basis} onChange={(e) => set((b) => {
+                  b.entry.basis = e.target.value as BotSettings['entry']['basis']
+                  // Kelly sizes a trade with no edge at nothing, so a pick bot sizes flat.
+                  if (b.entry.basis === 'pick') b.size.sizing = 'flat'
+                })}>
+                  <option value="edge">The edge</option>
+                  <option value="pick">Our pick</option>
+                </select>
+              </Field>
+              {edit.entry.basis === 'edge' && <>
+                <NumberField label="Minimum edge" tip={`${tip('Minimum edge')} ${tip('Edge (pp)')}`} suffix="pp" step={0.5} value={edit.entry.minEdgePp} measured={M.entry.minEdgePp} why="UserConfig.min_edge_threshold." onChange={(v) => set((b) => { b.entry.minEdgePp = v })} />
+                <NumberField label="Minimum EV after fees" tip={tip('EV after fees')} suffix="cents" step={0.1} value={edit.entry.minEvCents} measured={M.entry.minEvCents} why="Replaced price caps on 2026-08-31." onChange={(v) => set((b) => { b.entry.minEvCents = v })} />
+              </>}
               <NumberField label="Edge haircut" tip={tip('Edge haircut')} step={0.05} min={0} max={1} value={edit.entry.edgeHaircut} measured={M.entry.edgeHaircut} why="811 graded fills: our p ≥ 0.75 bucket won 62%. 1.0 trades the raw claimed edge." onChange={(v) => set((b) => { b.entry.edgeHaircut = v })} />
               <NumberField label="Maximum price age" tip={tip('Maximum price age')} suffix="s" value={edit.entry.maxPriceAgeS} measured={M.entry.maxPriceAgeS} max={180} why="The API nulls an edge against a price older than 180s." onChange={(v) => set((b) => { b.entry.maxPriceAgeS = v })} />
               <NumberField label="Price band low" tip={tip('Price band')} suffix="cents" value={edit.entry.priceBandC[0]} measured={M.entry.priceBandC[0]} min={1} max={99} why="The hot plays work." onChange={(v) => set((b) => { b.entry.priceBandC = [v, b.entry.priceBandC[1]] })} />
@@ -208,10 +206,20 @@ export function Bots() {
 
             <div className="section">Size</div>
             <div className="grid cols-2">
-              <NumberField label="Kelly multiplier" tip={`${tip('Kelly')} ${tip('Kelly multiplier')}`} step={0.05} min={0} max={1} value={edit.size.kellyMultiplier} measured={M.size.kellyMultiplier} why="Quarter Kelly." onChange={(v) => set((b) => { b.size.kellyMultiplier = v })} />
+              <Field label="Sizing" tip={tip('Sizing')} hint={edit.size.sizing === 'flat'
+                ? 'Every trade is the maximum per trade, whatever the edge.'
+                : edit.entry.basis === 'pick'
+                  ? 'Kelly sizes a trade with no edge at nothing, so this pick bot will skip most of its picks. Choose Flat.'
+                  : 'Sized by the edge, between the minimum and maximum per trade.'}>
+                <select value={edit.size.sizing} onChange={(e) => set((b) => { b.size.sizing = e.target.value as BotSettings['size']['sizing'] })}>
+                  <option value="kelly">Kelly</option>
+                  <option value="flat">Flat</option>
+                </select>
+              </Field>
+              {edit.size.sizing === 'kelly' && <NumberField label="Kelly multiplier" tip={`${tip('Kelly')} ${tip('Kelly multiplier')}`} step={0.05} min={0} max={1} value={edit.size.kellyMultiplier} measured={M.size.kellyMultiplier} why="Quarter Kelly." onChange={(v) => set((b) => { b.size.kellyMultiplier = v })} />}
               <NumberField label="Bankroll" tip={tip('Bankroll')} suffix="$, 0 = live balance" step={10} value={edit.size.bankrollUsd} measured={M.size.bankrollUsd} why="Kelly rides the real balance, the 2026-07-23 fluid bankroll." onChange={(v) => set((b) => { b.size.bankrollUsd = v })} />
               <NumberField label="Maximum per trade" tip={tip('Maximum per trade')} suffix="$" step={1} value={edit.size.maxTradeUsd} measured={M.size.maxTradeUsd} why="MLB_MAX_TRADE_USD." onChange={(v) => set((b) => { b.size.maxTradeUsd = v })} />
-              <NumberField label="Minimum per trade" tip={tip('Minimum per trade')} suffix="$" step={0.5} value={edit.size.minTradeUsd} measured={M.size.minTradeUsd} why="Below this a trade cannot pay its own fee." onChange={(v) => set((b) => { b.size.minTradeUsd = v })} />
+              {edit.size.sizing === 'kelly' && <NumberField label="Minimum per trade" tip={tip('Minimum per trade')} suffix="$" step={0.5} value={edit.size.minTradeUsd} measured={M.size.minTradeUsd} why="Below this a trade cannot pay its own fee." onChange={(v) => set((b) => { b.size.minTradeUsd = v })} />}
               <NumberField label="Maximum contracts per trade" tip={tip('Maximum contracts per trade')} value={edit.size.maxContracts} measured={M.size.maxContracts} onChange={(v) => set((b) => { b.size.maxContracts = v })} />
               <NumberField label="Maximum share of equity per game" tip={tip('Maximum share of equity per game')} step={0.05} min={0} max={1} value={edit.size.maxGameEquityPct} measured={M.size.maxGameEquityPct} why="The 255 contract single game positions." onChange={(v) => set((b) => { b.size.maxGameEquityPct = v })} />
             </div>
@@ -288,6 +296,105 @@ function ChangeTable({ changes }: { changes: Change[] }) {
         <thead><tr><th>Setting</th><th>Measured default</th><th>This bot</th></tr></thead>
         <tbody>{changes.map((c) => <tr key={c.field}><td className="mono">{c.field}</td><td>{show(c.from)}</td><td className="warn">{show(c.to)}</td></tr>)}</tbody>
       </table>
+    </div>
+  )
+}
+
+// The bot list, grouped by sport so a long list stays readable: a bot on one
+// sport sits under it, a bot on several under Several sports. Within a group,
+// live bots come first, then bots that are on, then by name. Search and the
+// status filter cut across every group; which groups are folded is remembered
+// on this computer only.
+const GROUP_ORDER = ['NBA', 'NFL', 'MLB', 'WC', 'Several sports'] as const
+const LANE_SHORT: Record<string, string> = { MONEYLINE: 'Moneyline', SPREAD: 'Spread', TOTAL: 'Total', TEAM_TOTAL: 'Team total', PROP: 'Props', COMBO: 'Combos' }
+const PHASE_SHORT: Record<string, string> = { pregame: 'Pregame', live: 'In game', both: 'Pregame and in game' }
+type StatusFilter = 'all' | 'on' | 'off' | 'live'
+const FOLD_KEY = 'bots.folded'
+
+const groupOf = (b: BotSettings): string => (b.market.sports.length === 1 ? b.market.sports[0]! : 'Several sports')
+const rank = (b: BotSettings): number => (b.mode === 'live' ? 0 : b.enabled ? 1 : 2)
+
+function BotList({ bots, selected, onSelect, onToggle, onCreate }: {
+  bots: BotSettings[]; selected: string | null
+  onSelect: (b: BotSettings) => void; onToggle: (b: BotSettings, on: boolean) => void; onCreate: () => Promise<void>
+}) {
+  const [query, setQuery] = useState('')
+  const [status, setStatus] = useState<StatusFilter>('all')
+  const [folded, setFolded] = useState<string[]>(() => {
+    try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) ?? '[]'); return Array.isArray(v) ? v : [] } catch { return [] }
+  })
+  const fold = (g: string): void => {
+    const next = folded.includes(g) ? folded.filter((x) => x !== g) : [...folded, g]
+    setFolded(next)
+    try { localStorage.setItem(FOLD_KEY, JSON.stringify(next)) } catch { /* a convenience only */ }
+  }
+
+  const q = query.trim().toLowerCase()
+  const shown = bots.filter((b) =>
+    (status === 'all' || (status === 'on' ? b.enabled : status === 'off' ? !b.enabled : b.mode === 'live')) &&
+    (!q || `${b.name} ${b.market.sports.join(' ')} ${b.market.lanes.map((l) => LANE_SHORT[l]).join(' ')}`.toLowerCase().includes(q)))
+  const groups = GROUP_ORDER.map((g) => ({
+    g, list: shown.filter((b) => groupOf(b) === g).sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+  })).filter((x) => x.list.length)
+  const on = bots.filter((b) => b.enabled).length
+  const live = bots.filter((b) => b.mode === 'live').length
+  const counts: Record<StatusFilter, number> = { all: bots.length, on, off: bots.length - on, live }
+
+  return (
+    <div className="card">
+      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
+        <h2 style={{ margin: 0 }}>Your bots</h2>
+        <button className="btn primary" onClick={() => void onCreate()}>New bot</button>
+      </div>
+      <p className="small muted" style={{ margin: '0 0 10px' }}>
+        {bots.length} bots, {on} on{live ? <>, <span className="bad">{live} live</span></> : ', all in paper'}.
+      </p>
+      <input type="text" placeholder="Search by name, sport or lane" value={query} onChange={(e) => setQuery(e.target.value)} />
+      <div className="chips" style={{ margin: '8px 0 4px' }}>
+        {(['all', 'on', 'off', 'live'] as const).map((s) => (
+          <span key={s} className={`chip ${status === s ? 'on' : ''}`} onClick={() => setStatus(s)}>
+            {s === 'all' ? 'All' : s === 'on' ? 'On' : s === 'off' ? 'Off' : 'Live'} {counts[s]}
+          </span>
+        ))}
+      </div>
+
+      {groups.map(({ g, list }) => {
+        // A search shows every match, folded or not, and the open bot's group
+        // never hides it.
+        const open = Boolean(q) || !folded.includes(g) || list.some((b) => b.id === selected)
+        const groupOn = list.filter((b) => b.enabled).length
+        return (
+          <div key={g} className="bot-group">
+            <div className="bot-group-head" onClick={() => fold(g)} role="button" aria-expanded={open}>
+              <span className="caret">{open ? '▾' : '▸'}</span>
+              <span className="name">{g}</span>
+              <span className="meta">{list.length} {list.length === 1 ? 'bot' : 'bots'}{groupOn ? `, ${groupOn} on` : ''}</span>
+            </div>
+            {open && list.map((b) => (
+              <div key={b.id} className={`list-item ${selected === b.id ? 'on' : ''}`} onClick={() => onSelect(b)}>
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'start' }}>
+                  <strong style={{ minWidth: 0 }}>{b.name}</strong>
+                  <span onClick={(e) => e.stopPropagation()}><Toggle on={b.enabled} onChange={(v) => onToggle(b, v)} /></span>
+                </div>
+                <div className="small muted">
+                  {PHASE_SHORT[b.market.phase]} · {b.market.lanes.map((l) => LANE_SHORT[l]).join(', ')}
+                  {g === 'Several sports' ? ` · ${b.market.sports.join(', ')}` : ''}
+                </div>
+                <div className="bot-tags">
+                  <span className={`pill ${b.mode === 'live' ? 'live' : ''}`}>{b.mode}</span>
+                  {b.entry.basis === 'pick' && <span className="pill lane">our pick</span>}
+                  {b.size.sizing === 'flat' && <span className="pill lane">flat ${b.size.maxTradeUsd}</span>}
+                  {b.exit.mode !== 'hold' && <span className="pill lane">exit +{b.exit.targetC}c</span>}
+                  {b.decider.kind === 'agent' && <span className="pill lane">agent</span>}
+                  {starterOf(b.id) && <span className="pill">starter</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      })}
+      {!bots.length && <p className="muted small">No bots yet.</p>}
+      {bots.length > 0 && !shown.length && <p className="muted small">No bot matches. <a onClick={() => { setQuery(''); setStatus('all') }} style={{ cursor: 'pointer' }}>Show all</a></p>}
     </div>
   )
 }

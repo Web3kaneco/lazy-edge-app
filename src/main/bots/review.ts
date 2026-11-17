@@ -85,7 +85,11 @@ export function reviewPlay(t: Ticket, bot: BotSettings | null, ev: Evidence, his
   const odds = /breakeven ([\d.]+)%, calibrated p ([\d.]+)%/.exec(t.audit.join(' '))
   const breakeven = odds ? Number(odds[1]) / 100 : null
   const p = odds ? Number(odds[2]) / 100 : null
-  if (p !== null && breakeven !== null) {
+  const pickBot = (t.rules?.basis ?? (t.rules ? 'edge' : bot?.entry.basis)) === 'pick'
+  const ourP = t.play?.ourP ?? null
+  if (pickBot) {
+    play('info', 'Edge', `The bot buys our pick and does not use the edge${ourP !== null ? `; our number gave this side ${pct(ourP)} to win` : ''}${breakeven !== null ? ` and it needed ${pct(breakeven)} to break even` : ''}.`)
+  } else if (p !== null && breakeven !== null) {
     if (p > breakeven) play('ok', 'Edge', `The bot rated it ${pct(p)} to win after its haircut and it needed ${pct(breakeven)} to break even, worth ${t.evCents.toFixed(1)}c a contract.`)
     else play('bad', 'Edge', `The bot rated it ${pct(p)} to win but it needed ${pct(breakeven)} to break even, so it should not have been taken.`)
   } else {
@@ -97,11 +101,12 @@ export function reviewPlay(t: Ticket, bot: BotSettings | null, ev: Evidence, his
     play('info', 'Rules', 'The bot has been deleted and this ticket is older than saved rules, so its rules cannot be checked.')
   } else {
     const broken: string[] = []
-    if (t.evCents < rules.minEvCents - 1e-6) broken.push(`expected value ${t.evCents.toFixed(1)}c is under the ${rules.minEvCents}c minimum`)
+    if (!pickBot && t.evCents < rules.minEvCents - 1e-6) broken.push(`expected value ${t.evCents.toFixed(1)}c is under the ${rules.minEvCents}c minimum`)
+    if (pickBot && ourP !== null && ourP <= 0.5) broken.push(`our number gave it ${pct(ourP)}, so it was not our pick`)
     const [lo, hi] = rules.priceBandC
     if (t.limitPriceC < lo || t.limitPriceC > hi) broken.push(`price ${t.limitPriceC}c is outside the ${lo} to ${hi}c band`)
     const edge = t.play?.edgePp
-    if (edge !== null && edge !== undefined && Math.abs(edge) < rules.minEdgePp - 1e-6) broken.push(`edge ${Math.abs(edge).toFixed(1)}pp is under the ${rules.minEdgePp}pp minimum`)
+    if (!pickBot && edge !== null && edge !== undefined && Math.abs(edge) < rules.minEdgePp - 1e-6) broken.push(`edge ${Math.abs(edge).toFixed(1)}pp is under the ${rules.minEdgePp}pp minimum`)
     if (t.costUsd > rules.maxTradeUsd + 0.01) broken.push(`cost ${money(t.costUsd)} is over the ${money(rules.maxTradeUsd)} trade limit`)
     if (t.contracts > rules.maxContracts) broken.push(`${t.contracts} contracts is over the ${rules.maxContracts} contract limit`)
     const against = t.rules ? 'the rules it ran with' : "the bot's settings now, which may have changed since this older ticket"
@@ -111,8 +116,11 @@ export function reviewPlay(t: Ticket, bot: BotSettings | null, ev: Evidence, his
     const measured = defaultBot('x', 'x').entry
     const loose: string[] = []
     if (rules.edgeHaircut > measured.edgeHaircut + 1e-9) loose.push(`haircut ${rules.edgeHaircut} (measured ${measured.edgeHaircut})`)
-    if (rules.minEvCents < measured.minEvCents - 1e-9) loose.push(`minimum EV ${rules.minEvCents}c (measured ${measured.minEvCents}c)`)
-    if (rules.minEdgePp < measured.minEdgePp - 1e-9) loose.push(`minimum edge ${rules.minEdgePp}pp (measured ${measured.minEdgePp}pp)`)
+    if (pickBot) loose.push('buys our pick with no edge or expected value minimum, a rule tested on 169 graded NBA games and not yet proven')
+    else {
+      if (rules.minEvCents < measured.minEvCents - 1e-9) loose.push(`minimum EV ${rules.minEvCents}c (measured ${measured.minEvCents}c)`)
+      if (rules.minEdgePp < measured.minEdgePp - 1e-9) loose.push(`minimum edge ${rules.minEdgePp}pp (measured ${measured.minEdgePp}pp)`)
+    }
     if (rules.priceBandC[0] < measured.priceBandC[0] || rules.priceBandC[1] > measured.priceBandC[1]) loose.push(`price band ${lo} to ${hi}c (measured ${measured.priceBandC[0]} to ${measured.priceBandC[1]}c)`)
     if (loose.length) play('look', 'Settings', `Looser than the measured defaults: ${loose.join('; ')}. Looser settings take plays the measured evidence says to skip.`)
     else play('ok', 'Settings', 'The entry settings are at or tighter than the measured defaults.')

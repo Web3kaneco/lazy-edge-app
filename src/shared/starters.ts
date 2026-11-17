@@ -139,6 +139,81 @@ export const STARTERS: Starter[] = [
       b.combo = { legs: 2, maxPerDay: 5, only: true }
     })
   },
+  // 0.9.0, from 169 graded NBA games and NFL weeks 1 to 8 (2026-11-17). Each
+  // is a test next to the bot it changes, not a proven winner.
+  {
+    key: 'nba-pick-live',
+    name: 'NBA our pick, live',
+    summary: 'In game NBA moneylines on the team our number has winning at 70% or more, even when the price is above our chance, up to 92c. A flat amount a trade, held to settlement. Our picks have won more often than we said on graded games, which is not yet proof.',
+    build: make('nba-pick-live', 'NBA our pick, live', (b) => {
+      b.market.sports = ['NBA']
+      b.market.lanes = ['MONEYLINE']
+      b.market.phase = 'live'
+      b.entry.basis = 'pick'
+      b.entry.minChancePct = { pregame: 70, Q1: 70, Q2: 70, Q3: 70, Q4: 70 }
+      b.entry.priceBandC = [25, 92]
+      b.entry.maxPriceAgeS = 60
+      b.size.sizing = 'flat'
+      b.size.maxTradeUsd = 5
+      b.guards.noEntryFinalS = 120
+      b.pollS = 10
+    })
+  },
+  {
+    key: 'nba-pick-pregame',
+    name: 'NBA our pick, pregame',
+    summary: 'NBA moneylines before the tip on the team our number has winning at 70% or more, up to 92c, a flat amount a trade, held to settlement. Checked once a minute.',
+    build: make('nba-pick-pregame', 'NBA our pick, pregame', (b) => {
+      b.market.sports = ['NBA']
+      b.market.lanes = ['MONEYLINE']
+      b.market.phase = 'pregame'
+      b.entry.basis = 'pick'
+      b.entry.minChancePct = { pregame: 70, Q1: 70, Q2: 70, Q3: 70, Q4: 70 }
+      b.entry.priceBandC = [25, 92]
+      b.size.sizing = 'flat'
+      b.size.maxTradeUsd = 5
+      b.pollS = 60
+    })
+  },
+  {
+    key: 'nba-live-70',
+    name: 'NBA live, 70% chance',
+    summary: 'The NBA live bot with one change: it takes only plays our number gives 70% or more to pay out. Run it next to NBA live to see what the floor is worth.',
+    build: make('nba-live-70', 'NBA live, 70% chance', (b) => {
+      b.market.sports = ['NBA']
+      b.market.lanes = ['MONEYLINE', 'SPREAD']
+      b.market.phase = 'live'
+      b.entry.maxPriceAgeS = 60
+      b.entry.minChancePct = { pregame: 70, Q1: 70, Q2: 70, Q3: 70, Q4: 70 }
+      b.guards.noEntryFinalS = 120
+      b.pollS = 10
+    })
+  },
+  {
+    key: 'nfl-pregame-sides',
+    name: 'NFL pregame sides, edge 10',
+    summary: 'The NFL pregame bot without totals, which lost on graded weeks, and with the edge bar raised to 10. Run it next to NFL pregame.',
+    build: make('nfl-pregame-sides', 'NFL pregame sides, edge 10', (b) => {
+      b.market.sports = ['NFL']
+      b.market.lanes = ['MONEYLINE', 'SPREAD']
+      b.market.phase = 'pregame'
+      b.entry.minEdgePp = 10
+      b.pollS = 60
+    })
+  },
+  {
+    key: 'nfl-hot-60',
+    name: 'NFL hot plays, up to 60c',
+    summary: 'The NFL hot plays bot with the price capped at 60c, cutting the 60 to 75c band that lost the most on graded weeks. Expect about break even at best. Run it next to NFL hot plays.',
+    build: make('nfl-hot-60', 'NFL hot plays, up to 60c', (b) => {
+      b.market.sports = ['NFL']
+      b.market.phase = 'live'
+      b.entry.requireTrigger = true
+      b.entry.maxPriceAgeS = 60
+      b.entry.priceBandC = [25, 60]
+      b.pollS = 10
+    })
+  },
   {
     key: 'explorer',
     name: 'Explorer, tiny size',

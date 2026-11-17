@@ -59,7 +59,14 @@ export interface Signal {
   // market's chance it wins the game. Either is null when the feed gives
   // none, and the field is missing where the feed carries no score.
   team?: { lead: number | null; winP: number | null }
+  // Our pick on a game whose edge points at the other team, or has no edge
+  // at all (2026-11-17). Only a bot that buys our pick reads it.
+  pickOnly?: boolean
 }
+
+// Whether a signal is our pick: our number has the contract it buys paying
+// out more often than not. A dead even game has no pick.
+export const isOurPick = (s: Pick<Signal, 'ourP'>): boolean => s.ourP !== null && s.ourP > 0.5
 
 // A play that backs one team to win or cover.
 export const isTeamPlay = (s: Pick<Signal, 'lane'>): boolean => s.lane === 'MONEYLINE' || s.lane === 'SPREAD'

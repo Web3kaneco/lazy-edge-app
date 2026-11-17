@@ -65,6 +65,7 @@ export const GLOSSARY: Section[] = [
   {
     title: 'Entry: when a play is good enough',
     terms: [
+      t('Buy on', 'What a trade is chosen on. The edge buys where our chance beats the price by the minimum edge and expected value. Our pick buys only the side our number has winning, at the minimum chance and inside the price band, even when the price is above our chance, and the edge and EV minimums are not used. Graded NBA games showed our picks winning more often than we said, so the edge pointed at the other team; on 169 games it is promising and not yet proven, so prove it on paper first. NBA moneylines carry a pick on every game; other plays are bought only when the feed already backs our pick.'),
       t('Edge (pp)', 'Probability points: our chance that the contract pays minus the market\'s. 62% against 55% is a 7pp edge.'),
       t('Minimum edge', 'Plays with a smaller edge than this are skipped.'),
       t('EV after fees', 'Expected profit per contract in cents, after the venue\'s fee and the edge haircut, at the price you would actually pay. A play must clear this to trade.'),
@@ -81,6 +82,7 @@ export const GLOSSARY: Section[] = [
   {
     title: 'Size: how much to put on',
     terms: [
+      t('Sizing', 'Kelly sizes each trade by its edge, so a trade with no edge is sized at nothing. Flat makes every trade the maximum per trade, whatever the edge, still held to your balance, the contract limit and the game cap. A bot that buys our pick needs Flat.'),
       t('Kelly', 'A standard formula for bet size from your edge and the price. Full Kelly is aggressive, so bots use a fraction of it.'),
       t('Kelly multiplier', 'The fraction of full Kelly to bet. 0.25 is quarter Kelly.'),
       t('Bankroll', 'The money Kelly sizes against. 0 uses the venue\'s live balance, so bets shrink after losses and grow after wins.'),
@@ -124,6 +126,8 @@ export const GATES: Record<string, string> = {
   quarter_unknown: 'Quarter unreadable',
   min_chance: 'Chance to hit is under your minimum',
   not_favorite: 'Backs the team the market expects to lose',
+  not_our_pick: 'Not our pick: our number has this side losing',
+  pick_only: 'Our pick, for bots that buy on our pick',
   favorite_unknown: 'Could not read which team is favored',
   trailing: 'Backs a team further behind than you allow',
   score_unknown: 'Score unreadable',

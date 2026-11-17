@@ -114,7 +114,14 @@ export const BotSettings = z.object({
     maxTrailing: z.object({ Q1: trailing, Q2: trailing, Q3: trailing, Q4: trailing })
       .default({ Q1: null, Q2: null, Q3: null, Q4: null }),
     // Only back the team the market prices at 50% or more to win the game.
-    favoritesOnly: z.boolean().default(false)
+    favoritesOnly: z.boolean().default(false),
+    // What a trade is chosen on (2026-11-17). 'edge' buys where our chance
+    // beats the price by the minimum edge and expected value. 'pick' buys only
+    // the side our number has winning (over 50%), at the minimum chance and
+    // inside the price band, with the edge and expected value minimums not
+    // used: graded NBA games showed our picks winning more often than we said,
+    // so the edge pointed at the other team. Bots saved before 0.9.0 use edge.
+    basis: z.enum(['edge', 'pick']).default('edge')
   }),
 
   size: z.object({
@@ -126,7 +133,11 @@ export const BotSettings = z.object({
     // its own fee, so an EV positive trade below it is rounded up to it.
     minTradeUsd: usd,
     maxContracts: z.number().int().min(1),
-    maxGameEquityPct: pct
+    maxGameEquityPct: pct,
+    // 'kelly' sizes by the edge, so a trade with no edge is sized at nothing.
+    // 'flat' makes every trade the largest trade amount, whatever the edge,
+    // still held to the balance, the contract limit and the game cap.
+    sizing: z.enum(['kelly', 'flat']).default('kelly')
   }),
 
   // How a position is closed (2026-11-16). The engine acts on every mode; a

@@ -40,6 +40,9 @@ export const lazyedge = {
   mlbEdges: () => api<any>('/v1/mlb/edges'),
   mlbLive: () => api<any>('/v1/mlb/live'),
   nbaLive: () => api<any>('/v1/edges/live'),
+  // Our pick in each NBA game, pregame and live, with its record and price
+  // (2026-11-17). Read only when a bot buys our pick.
+  nbaPicks: () => api<any>('/v1/nba/picks'),
   // Points, rebounds and assists for every game on the slate, with the chance
   // of the over pregame and live, the Kalshi contract and its live price.
   nbaProps: () => api<any>('/v1/nba/props'),

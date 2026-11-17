@@ -150,6 +150,14 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .list-item { padding: 10px 12px; border-left: 2px solid transparent; cursor: pointer; }
 .list-item:hover { background: var(--raised); }
 .list-item.on { border-left-color: var(--accent); background: var(--accent-wash); }
+/* The bot list's sport groups. */
+.bot-group { margin-top: 10px; }
+.bot-group-head { display: flex; align-items: baseline; gap: 8px; padding: 6px 2px; border-bottom: 1px solid var(--line); cursor: pointer; user-select: none; }
+.bot-group-head:hover .name { color: var(--accent); }
+.bot-group-head .caret { width: 10px; color: var(--faint); font-size: 11px; }
+.bot-group-head .name { font: 700 12px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg); }
+.bot-group-head .meta { margin-left: auto; font: 11px var(--mono); color: var(--faint); }
+.bot-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
 /* ── Help tips. Any element with data-tip and .tip or .has-tip shows its
    text on hover or keyboard focus, below the element so it is never clipped
    by the top of the scrolling page. ── */

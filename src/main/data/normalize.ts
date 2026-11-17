@@ -376,41 +376,127 @@ const isHomeTeam = (team: unknown, row: any): boolean | null => {
   return null
 }
 
-export function nbaLiveEdges(body: any, now: number): Normalized {
+// With picks on (a bot buys our pick), every fresh row also gives our pick,
+// the team our_prob has winning, whenever the row's own signal is the other
+// team or HOLD. That signal is marked pickOnly and priced on the pick's own
+// ticker from the row's routing keys, so an edge bot never sees it.
+export function nbaLiveEdges(body: any, now: number, picks = false): Normalized {
   const out: Normalized = { signals: [], refused: [] }
   for (const r of Array.isArray(body) ? body : []) {
     const gid = String(r.game_id ?? '')
     const sig = String(r.trade_signal ?? 'HOLD').toUpperCase()
-    if (sig === 'HOLD') continue
-    if (sig !== 'BUY' && sig !== 'SELL') { out.refused.push({ source: 'nba.edges', reason: `signal ${sig}` }); continue }
+    if (sig === 'HOLD' && !picks) continue
+    if (sig !== 'BUY' && sig !== 'SELL' && sig !== 'HOLD') { out.refused.push({ source: 'nba.edges', reason: `signal ${sig}` }); continue }
     const problem = nbaRowProblem(r)
     if (problem) { out.refused.push({ source: 'nba.edges', reason: problem }); continue }
-    if (String(r.target_side ?? '').toUpperCase() !== 'YES') { out.refused.push({ source: 'nba.edges', reason: `target side ${r.target_side}` }); continue }
     const pHome = num(r.our_prob)
     if (pHome === null || pHome <= 0 || pHome >= 1) { out.refused.push({ source: 'nba.edges', reason: `no model probability on ${gid}` }); continue }
 
-    const home = sig === 'BUY'
-    const ticker = r.target_kalshi_ticker ? String(r.target_kalshi_ticker) : ''
-    const edge = num(r.edge_score)
     const mid = num(r.kalshi_implied)
     const clock = parseNbaClock(r.clock, r.period)
+    const edgeSide: boolean | null = sig === 'BUY' ? true : sig === 'SELL' ? false : null
+    const build = (home: boolean, ticker: string, edgePp: number | null, pickOnly: boolean): Signal => {
+      const team = home ? r.home_team : r.away_team
+      return {
+        key: `nba:${gid}:MONEYLINE:${home ? 'home' : 'away'}`, sport: 'NBA', lane: 'MONEYLINE',
+        phase: nbaPhase(r, clock), gameId: gid,
+        title: `${r.away_team ?? ''} @ ${r.home_team ?? ''} ${team ?? ''} to win`.trim(),
+        signalType: home ? 'BUY_HOME' : 'BUY_AWAY', explicitSide: 'yes',
+        ourP: home ? pHome : 1 - pHome,
+        marketP: mid === null || mid <= 0 ? null : home ? mid : 1 - mid,
+        edgePp, label: 'PRICE_GAP', kelly: null, trigger: false, measured: false, clock,
+        quotes: ticker ? [{ venue: 'kalshi', contract: ticker, side: 'yes', ask: null, askSize: null, priceAgeS: null }] : [],
+        why: r.momentum_state && r.momentum_state !== 'NEUTRAL' ? `Momentum ${String(r.momentum_state).toLowerCase().replace('_', ' ')}` : null,
+        receivedAt: now, matchup: matchupOf(r),
+        team: nbaTeamState(r, home),
+        ...(pickOnly ? { pickOnly: true } : {})
+      }
+    }
+
+    if (edgeSide !== null) {
+      if (String(r.target_side ?? '').toUpperCase() !== 'YES') {
+        out.refused.push({ source: 'nba.edges', reason: `target side ${r.target_side}` })
+      } else {
+        const ticker = r.target_kalshi_ticker ? String(r.target_kalshi_ticker) : ''
+        const edge = num(r.edge_score)
+        // edge_score is a fraction against the home mid; the gates read points.
+        out.signals.push(build(edgeSide, ticker, edge === null ? null : Math.abs(edge) * 100, false))
+        if (!ticker) out.refused.push({ source: 'nba.edges', reason: 'no target ticker' })
+      }
+    }
+
+    // Our pick, when the row's signal is not already it. A tie has no pick.
+    if (!picks || pHome === 0.5) continue
+    const pickHome = pHome > 0.5
+    if (edgeSide === pickHome) continue
+    const ticker = String((pickHome ? r.kalshi_home_ticker : r.kalshi_away_ticker) ?? '')
+    if (!ticker) { out.refused.push({ source: 'nba.edges', reason: `no ${pickHome ? 'home' : 'away'} ticker for our pick on ${gid}` }); continue }
+    const ourPick = pickHome ? pHome : 1 - pHome
+    const mPick = mid === null || mid <= 0 || mid >= 1 ? null : pickHome ? mid : 1 - mid
+    out.signals.push(build(pickHome, ticker, mPick === null ? null : (ourPick - mPick) * 100, true))
+  }
+  return out
+}
+
+// NBA picks, from NBAPickResponse (/v1/nba/picks, 2026-11-17): the team our
+// number has winning in each game, the contract on it, its record and its
+// price. Every usable row is a pick signal, read only by a bot that buys our
+// pick. The API's BACK or WATCH is shown, never obeyed: the bot's own minimum
+// chance and price band decide, so the settings stay the product. ourP is our
+// raw number, the one the minimum chance has always read; the corrected
+// chance and the record ride along in the note.
+//
+// A live pick is held to the live feed's 180 seconds. A pregame number moves
+// slowly, so it may be older, but one past three hours is a stalled pipeline
+// and is refused.
+const NBA_PICK_MAX_AGE_S = { live: NBA_MAX_SIGNAL_AGE_S, pregame: 3 * 3600 }
+
+const pct = (p: number): string => `${Math.round(p * 100)}%`
+const tally = (r: any): string | null => (r && num(r.n) ? `${r.won}-${r.lost}` : null)
+
+export function nbaPicks(body: any, now: number): Normalized {
+  const out: Normalized = { signals: [], refused: [] }
+  for (const r of Array.isArray(body) ? body : []) {
+    const gid = String(r.game_id ?? '')
+    const refuse = (reason: string): void => { out.refused.push({ source: 'nba.picks', reason }) }
+    if (!r.model_ready) { refuse(`no model number yet on ${gid}`); continue }
+    if (r.signal_stale) { refuse('signal flagged stale by the server'); continue }
+    const side = String(r.pick_side ?? '').toLowerCase()
+    if (side !== 'home' && side !== 'away') { refuse(`no pick on ${gid}`); continue }
+    const p = num(r.pick_p)
+    if (p === null || p <= 0 || p >= 1) { refuse(`no chance on the pick on ${gid}`); continue }
+    const ticker = String(r.target_kalshi_ticker ?? '')
+    if (!ticker) { refuse(`no ticker for our pick on ${gid}`); continue }
+    const clock = parseNbaClock(r.clock, r.period)
+    const phase: Signal['phase'] = String(r.phase) === 'live' || nbaPhase(r, clock) === 'live' ? 'live' : 'pregame'
+    const at = num(r.computed_at_ms)
+    if (at === null || at <= 0) { refuse(`no time on the pick on ${gid}`); continue }
+    const age = Math.max(0, Math.round((now - at) / 1000))
+    if (age > NBA_PICK_MAX_AGE_S[phase]) { refuse(`pick ${age}s old`); continue }
+
+    const home = side === 'home'
     const team = home ? r.home_team : r.away_team
+    const price = num(r.price)
+    const raw = num(r.raw_edge)
+    const cp = num(r.corrected_p)
+    const season = tally(r.record_season)
+    const week = tally(r.record_7d)
+    const why = [
+      cp !== null ? `Corrected chance ${pct(cp)}` : null,
+      season ? `picks at this chance ${season} this season${week ? `, ${week} in the last 7 days` : ''}` : null,
+      r.edge_against_pick && r.edge_team ? `the edge points at ${r.edge_team}` : null,
+      `API ${String(r.signal ?? 'WATCH')}${r.reason ? `: ${r.reason}` : ''}`
+    ].filter(Boolean).join('; ')
     out.signals.push({
-      key: `nba:${gid}:MONEYLINE:${home ? 'home' : 'away'}`, sport: 'NBA', lane: 'MONEYLINE',
-      phase: nbaPhase(r, clock), gameId: gid,
+      key: `nba:${gid}:MONEYLINE:${side}`, sport: 'NBA', lane: 'MONEYLINE', phase, gameId: gid,
       title: `${r.away_team ?? ''} @ ${r.home_team ?? ''} ${team ?? ''} to win`.trim(),
       signalType: home ? 'BUY_HOME' : 'BUY_AWAY', explicitSide: 'yes',
-      ourP: home ? pHome : 1 - pHome,
-      marketP: mid === null || mid <= 0 ? null : home ? mid : 1 - mid,
-      // edge_score is a fraction against the home mid; the gates read points.
-      edgePp: edge === null ? null : Math.abs(edge) * 100,
-      label: 'PRICE_GAP', kelly: null, trigger: false, measured: false, clock,
-      quotes: ticker ? [{ venue: 'kalshi', contract: ticker, side: 'yes', ask: null, askSize: null, priceAgeS: null }] : [],
-      why: r.momentum_state && r.momentum_state !== 'NEUTRAL' ? `Momentum ${String(r.momentum_state).toLowerCase().replace('_', ' ')}` : null,
-      receivedAt: now, matchup: matchupOf(r),
-      team: nbaTeamState(r, home)
+      ourP: p, marketP: price, edgePp: raw === null ? null : raw * 100,
+      label: 'PRICE_GAP', kelly: null, trigger: false, measured: false, clock: phase === 'live' ? clock : null,
+      quotes: [{ venue: 'kalshi', contract: ticker, side: 'yes', ask: null, askSize: null, priceAgeS: null }],
+      why, receivedAt: now, matchup: matchupOf(r),
+      team: nbaTeamState(r, home), pickOnly: true
     })
-    if (!ticker) out.refused.push({ source: 'nba.edges', reason: 'no target ticker' })
   }
   return out
 }

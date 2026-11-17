@@ -13,9 +13,12 @@ export interface PlayRules {
   priceBandC: [number, number]
   maxTradeUsd: number
   maxContracts: number
+  // From 0.9.0; missing on older tickets, which traded on the edge.
+  basis?: 'edge' | 'pick'
 }
 
 export const rulesOf = (bot: BotSettings): PlayRules => ({
+  basis: bot.entry.basis,
   minEdgePp: bot.entry.minEdgePp,
   minEvCents: bot.entry.minEvCents,
   edgeHaircut: bot.entry.edgeHaircut,

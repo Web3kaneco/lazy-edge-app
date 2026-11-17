@@ -25,6 +25,8 @@ const Draft = z.object({
   // The most points a backed team may trail by, every quarter; -1 is no limit.
   maxTrailingPoints: z.number(),
   favoritesOnly: z.boolean(),
+  buyOurPick: z.boolean(),
+  flatSize: z.boolean(),
   exitMode: ExitMode,
   exitTargetC: z.number(),
   minEvCents: z.number(),
@@ -62,7 +64,7 @@ Rules:
 2. Every default was measured on real fills. If the description asks for something looser than a default, set what they asked and say in the explanation which measured lesson that relaxes.
 3. You only fill settings. You never decide trades, never predict outcomes, and never describe anything as a recommendation.
 4. If the description asks for something these settings cannot express, leave the settings at their defaults for it and list it in unsupported, in the trader's own words.
-5. Probabilities are in probability points (5 means 5pp). Prices are in cents. Money is in dollars. maxTrailingPoints is the most points a team the bot backs may be behind in a live game, every quarter, and -1 means no limit; favoritesOnly backs only the team the market prices to win.
+5. Probabilities are in probability points (5 means 5pp). Prices are in cents. Money is in dollars. maxTrailingPoints is the most points a team the bot backs may be behind in a live game, every quarter, and -1 means no limit; favoritesOnly backs only the team the market prices to win. buyOurPick buys only the side the Lazy Edge number has winning and ignores minEdgePp and minEvCents; set it only when the description asks to follow our pick or the model's favourite rather than the edge. flatSize makes every trade maxTradeUsd instead of Kelly sizing; a bot with buyOurPick needs it, because Kelly sizes a trade with no edge at nothing.
 6. Write the explanation as two or three plain sentences.
 
 Ruleset ${RULESET_VERSION}. Measured defaults:
@@ -107,7 +109,8 @@ export async function draftStrategy(provider: AiProvider, sentence: string, guid
       const n = d.maxTrailingPoints < 0 ? null : Math.round(d.maxTrailingPoints)
       return { Q1: n, Q2: n, Q3: n, Q4: n }
     })(),
-    favoritesOnly: d.favoritesOnly
+    favoritesOnly: d.favoritesOnly,
+    basis: d.buyOurPick ? 'pick' : 'edge'
   }
   bot.exit = { mode: d.exitMode, targetC: Math.round(d.exitTargetC) }
   bot.size = {
@@ -116,7 +119,8 @@ export async function draftStrategy(provider: AiProvider, sentence: string, guid
     maxTradeUsd: d.maxTradeUsd,
     minTradeUsd: d.minTradeUsd,
     maxContracts: Math.round(d.maxContracts),
-    maxGameEquityPct: d.maxGameEquityPct
+    maxGameEquityPct: d.maxGameEquityPct,
+    sizing: d.flatSize ? 'flat' : 'kelly'
   }
   bot.guards = {
     ...base.guards,

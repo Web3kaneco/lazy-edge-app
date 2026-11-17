@@ -72,6 +72,7 @@ export function applyFix(bot: BotSettings, f: Fix): { next: BotSettings | null; 
       b.entry.priceBandC = [b.entry.priceBandC[0], f.c]
       break
     case 'minEdge':
+      if (b.entry.basis === 'pick') return no('it buys our pick and does not use the edge')
       if (b.entry.minEdgePp >= f.pp) return no('already at or above it')
       b.entry.minEdgePp = f.pp
       break
