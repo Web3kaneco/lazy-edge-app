@@ -14,6 +14,9 @@ export interface VenueQuote {
   // ask, never the mid (agent guide, reading the data safely, rule 5).
   ask: number | null
   askSize: number | null
+  // The best bid on our side in dollars, read with the ask on the live
+  // requote. Missing or null means unknown.
+  bid?: number | null
   // Seconds since this price last changed. Null means unknown, which the
   // gates treat as stale.
   priceAgeS: number | null

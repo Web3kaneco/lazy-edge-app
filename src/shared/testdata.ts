@@ -88,7 +88,7 @@ export function ticketsCsv(tickets: TestTicket[]): string {
       p.edgePp?.toFixed(2), p.ourP?.toFixed(4), p.quarter, p.lead, p.teamWinP?.toFixed(4), t.title, t.contract, t.side, t.status, t.contracts, t.filledContracts, t.avgFillC,
       t.costUsd.toFixed(2), t.feeUsd.toFixed(2), t.evCents.toFixed(2), t.pnlUsd?.toFixed(2),
       t.rules?.minEdgePp, t.rules?.minEvCents, t.rules?.edgeHaircut, t.rules ? t.rules.priceBandC.join('-') : null, t.rules?.maxTradeUsd,
-      t.exit?.mode ?? 'hold', t.exit?.targetC, t.exit?.filledContracts, t.exit?.avgC, t.exit?.status, t.error, t.id]
+      t.exit?.mode ?? 'hold', t.exit?.mode === 'time' ? null : t.exit?.targetC,t.exit?.filledContracts, t.exit?.avgC, t.exit?.status, t.error, t.id]
   })
   return table(head, rows)
 }

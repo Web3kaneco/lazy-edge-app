@@ -161,6 +161,14 @@ export function Bots() {
                   <option value="pick">Our pick</option>
                 </select>
               </Field>
+              {edit.entry.basis === 'pick' && (
+                <Field label="Our chance above the price" tip={tip('Our chance above the price')} hint={edit.entry.pickGapPp === null
+                  ? 'Off: the price may be above our chance, up to the top of the band.'
+                  : `Buys only when our chance is at least ${edit.entry.pickGapPp} points above the price.`}>
+                  <input type="number" min={0} max={50} step={0.5} placeholder="off" value={edit.entry.pickGapPp ?? ''}
+                    onChange={(e) => set((b) => { const v = e.target.value === '' ? null : Number(e.target.value); b.entry.pickGapPp = v === null || !Number.isFinite(v) ? null : Math.min(50, Math.max(0, v)) })} />
+                </Field>
+              )}
               {edit.entry.basis === 'edge' && <>
                 <NumberField label="Minimum edge" tip={`${tip('Minimum edge')} ${tip('Edge (pp)')}`} suffix="pp" step={0.5} value={edit.entry.minEdgePp} measured={M.entry.minEdgePp} why="UserConfig.min_edge_threshold." onChange={(v) => set((b) => { b.entry.minEdgePp = v })} />
                 <NumberField label="Minimum EV after fees" tip={tip('EV after fees')} suffix="cents" step={0.1} value={edit.entry.minEvCents} measured={M.entry.minEvCents} why="Replaced price caps on 2026-08-31." onChange={(v) => set((b) => { b.entry.minEvCents = v })} />
@@ -169,6 +177,12 @@ export function Bots() {
               <NumberField label="Maximum price age" tip={tip('Maximum price age')} suffix="s" value={edit.entry.maxPriceAgeS} measured={M.entry.maxPriceAgeS} max={180} why="The API nulls an edge against a price older than 180s." onChange={(v) => set((b) => { b.entry.maxPriceAgeS = v })} />
               <NumberField label="Price band low" tip={tip('Price band')} suffix="cents" value={edit.entry.priceBandC[0]} measured={M.entry.priceBandC[0]} min={1} max={99} why="The hot plays work." onChange={(v) => set((b) => { b.entry.priceBandC = [v, b.entry.priceBandC[1]] })} />
               <NumberField label="Price band high" tip={tip('Price band')} suffix="cents" value={edit.entry.priceBandC[1]} measured={M.entry.priceBandC[1]} min={1} max={99} onChange={(v) => set((b) => { b.entry.priceBandC = [b.entry.priceBandC[0], v] })} />
+              <Field label="Widest book" tip={tip('Widest book')} hint={edit.entry.maxSpreadC === null
+                ? 'Off: buys into a book of any width.'
+                : `Buys only where the ask is at most ${edit.entry.maxSpreadC}c above the bid. Kalshi books only.`}>
+                <input type="number" min={1} max={50} step={1} placeholder="off" value={edit.entry.maxSpreadC ?? ''}
+                  onChange={(e) => set((b) => { const v = e.target.value === '' ? null : Math.round(Number(e.target.value)); b.entry.maxSpreadC = v === null || !Number.isFinite(v) ? null : Math.min(50, Math.max(1, v)) })} />
+              </Field>
             </div>
             <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>
               <Toggle on={edit.entry.requireTrigger} onChange={(v) => set((b) => { b.entry.requireTrigger = v })} label={<>Require a game event trigger<Tip text={tip('Require a game event trigger')} /></>} />
@@ -235,24 +249,36 @@ export function Bots() {
               <Toggle on={edit.guards.noOvertime} onChange={(v) => set((b) => { b.guards.noOvertime = v })} label={<>No entries in overtime<Tip text={tip('No entries in overtime')} /></>} />
               <Toggle on={edit.guards.onePositionPerMarket} onChange={(v) => set((b) => { b.guards.onePositionPerMarket = v })} label={<>One position per market<Tip text={tip('One position per market')} /></>} />
               <Toggle on={edit.guards.noOpposingBets} onChange={(v) => set((b) => { b.guards.noOpposingBets = v })} label={<>Never bet against itself<Tip text={tip('Never bet against itself')} /></>} />
+              <Toggle on={edit.guards.oneEntryPerGame} onChange={(v) => set((b) => { b.guards.oneEntryPerGame = v })} label={<>One entry a game<Tip text={tip('One entry a game')} /></>} />
             </div>
 
             <div className="section">Exit</div>
             <div className="grid cols-2">
-              <Field label="Exit" tip={`${tip('Exit')} ${tip('Trading both sides')}`} hint={edit.exit.mode === 'hold' ? 'Held until the market settles.' : edit.exit.mode === 'limit' ? 'A sell rests on the book the moment the entry fills.' : 'Sells at the bid once the bid reaches the mark.'}>
+              <Field label="Exit" tip={`${tip('Exit')} ${tip('Trading both sides')}`} hint={edit.exit.mode === 'hold' ? 'Held until the market settles.' : edit.exit.mode === 'limit' ? 'A sell rests on the book the moment the entry fills.' : edit.exit.mode === 'time'
+                ? `Sells at the bid ${edit.exit.afterMin} minutes after the entry${edit.exit.atQuarterEnd ? ', or at the end of its quarter if that comes first' : ''}, whatever the price.`
+                : 'Sells at the bid once the bid reaches the mark.'}>
                 <select value={edit.exit.mode} onChange={(e) => set((b) => { b.exit.mode = e.target.value as BotSettings['exit']['mode'] })}>
                   <option value="hold">Hold to settlement</option>
                   <option value="limit">Limit exit at entry + target</option>
                   <option value="mark">Cash out at the mark</option>
+                  <option value="time">Sell after a set time</option>
                 </select>
               </Field>
-              {edit.exit.mode !== 'hold' && (
+              {(edit.exit.mode === 'limit' || edit.exit.mode === 'mark') && (
                 <NumberField label="Exit target" tip={tip('Exit target')} suffix="cents above entry" step={1} min={1} max={50} value={edit.exit.targetC} measured={M.exit.targetC} onChange={(v) => set((b) => { b.exit.targetC = Math.round(v) })} />
               )}
+              {edit.exit.mode === 'time' && (
+                <NumberField label="Sell after" tip={tip('Sell after')} suffix="minutes" step={1} min={1} max={60} value={edit.exit.afterMin} measured={M.exit.afterMin} onChange={(v) => set((b) => { b.exit.afterMin = Math.min(60, Math.max(1, Math.round(v))) })} />
+              )}
             </div>
+            {edit.exit.mode === 'time' && (
+              <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>
+                <Toggle on={edit.exit.atQuarterEnd} onChange={(v) => set((b) => { b.exit.atQuarterEnd = v })} label={<>Or at the end of the quarter<Tip text={tip('Or at the end of the quarter')} /></>} />
+              </div>
+            )}
             {edit.exit.mode !== 'hold' && (
               <p className="small muted" style={{ marginTop: 8 }}>
-                Once everything held in a market has sold, the bot may enter that game again, either side.{edit.guards.onePositionPerMarket ? '' : ' One position per market is off, so it may also add to a position it holds.'} Exits work on paper and Kalshi; anything bought elsewhere is held to settlement.
+                {edit.guards.oneEntryPerGame ? 'One entry a game is on, so once it has sold the bot does not enter that game again today.' : 'Once everything held in a market has sold, the bot may enter that game again, either side.'}{edit.guards.onePositionPerMarket ? '' : ' One position per market is off, so it may also add to a position it holds.'} Exits work on paper and Kalshi; anything bought elsewhere is held to settlement.
               </p>
             )}
             {account && <Limits bot={edit} account={account} />}
@@ -384,7 +410,8 @@ function BotList({ bots, selected, onSelect, onToggle, onCreate }: {
                   <span className={`pill ${b.mode === 'live' ? 'live' : ''}`}>{b.mode}</span>
                   {b.entry.basis === 'pick' && <span className="pill lane">our pick</span>}
                   {b.size.sizing === 'flat' && <span className="pill lane">flat ${b.size.maxTradeUsd}</span>}
-                  {b.exit.mode !== 'hold' && <span className="pill lane">exit +{b.exit.targetC}c</span>}
+                  {(b.exit.mode === 'limit' || b.exit.mode === 'mark') && <span className="pill lane">exit +{b.exit.targetC}c</span>}
+                  {b.exit.mode === 'time' && <span className="pill lane">sell after {b.exit.afterMin}m</span>}
                   {b.decider.kind === 'agent' && <span className="pill lane">agent</span>}
                   {starterOf(b.id) && <span className="pill">starter</span>}
                 </div>

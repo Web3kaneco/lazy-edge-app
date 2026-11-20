@@ -7,6 +7,8 @@ import type { TradeDecision, VenueState } from '../rules/gates'
 export interface Quote {
   ask: number | null
   askSize: number | null
+  // The best bid on the same side, in dollars, where the book shows it.
+  bid?: number | null
   // Age of the book we just read. Zero means we read it this instant.
   priceAgeS: number
 }

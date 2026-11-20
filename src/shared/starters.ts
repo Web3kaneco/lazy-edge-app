@@ -123,7 +123,7 @@ export const STARTERS: Starter[] = [
       b.market.phase = 'live'
       b.entry.maxPriceAgeS = 60
       b.guards.noEntryFinalS = 120
-      b.exit = { mode: 'limit', targetC: 10 }
+      b.exit = { ...b.exit, mode: 'limit', targetC: 10 }
       b.pollS = 10
     })
   },
@@ -141,6 +141,55 @@ export const STARTERS: Starter[] = [
   },
   // 0.9.0, from 169 graded NBA games and NFL weeks 1 to 8 (2026-11-17). Each
   // is a test next to the bot it changes, not a proven winner.
+  {
+    key: 'kaneco',
+    name: "Kaneco's bot",
+    summary: 'Backs our own confident pick and never chases the edge, which mostly points at underdogs we expect to lose and lost 7.5c a contract in the NFL over the season. NBA and NFL moneylines, before the game and in play: only the team our number has winning, at 70% or more, priced at least 3 points under our number and no higher than 92c. One entry a game, held to the final, the same $5 every time, and no totals. Graded so far: NFL live our pick at 70% priced under our number made 4.1c a contract over 144 games, inside the noise of about 3.5c, and NBA our pick made 6c to 14c a contract over about 170 games. Promising, not proven: run it in paper for a few weeks of nights.',
+    build: make('kaneco', "Kaneco's bot", (b) => {
+      b.market.sports = ['NBA', 'NFL']
+      b.market.lanes = ['MONEYLINE']
+      b.market.phase = 'both'
+      b.market.labels = ['PRICE_GAP', 'RATING_Q', 'LEAN', 'ROLE_Q', 'MEASURED']
+      b.entry.basis = 'pick'
+      b.entry.pickGapPp = 3
+      b.entry.minChancePct = { pregame: 70, Q1: 70, Q2: 70, Q3: 70, Q4: 70 }
+      b.entry.priceBandC = [25, 92]
+      b.entry.maxPriceAgeS = 60
+      b.size.sizing = 'flat'
+      b.size.maxTradeUsd = 5
+      b.exit.mode = 'hold'
+      // One entry a game: one position a contract, never the other side, and
+      // moneylines only, so a pregame entry is not added to in play.
+      b.guards.onePositionPerMarket = true
+      b.guards.noOpposingBets = true
+      b.guards.oneEntryPerGame = true
+      b.guards.noEntryFinalS = 120
+      b.pollS = 10
+    })
+  },
+  {
+    key: 'nba-q4-catchup',
+    name: 'NBA 4th quarter catch up',
+    summary: 'A slow catch up trade, not a bet on who wins. In the 4th quarter, when our number and the market are 8 points or more apart and the book is no more than 3c wide, it buys at the ask, sells at the bid 15 minutes later or at the end of the quarter, and never sells early because the gap closed. One entry a game, a flat $5. On c2 games the 4th quarter price moved toward our number by about 8c over 15 minutes before costs, but the held trade has 9 measured trades behind it, so this is a candidate rule to prove in paper. The 2nd quarter measured the same way more weakly; add Q2 to test it.',
+    build: make('nba-q4-catchup', 'NBA 4th quarter catch up', (b) => {
+      b.market.sports = ['NBA']
+      b.market.lanes = ['MONEYLINE']
+      b.market.phase = 'live'
+      b.market.quarters = ['Q4']
+      b.entry.minEdgePp = 8
+      b.entry.maxSpreadC = 3
+      b.entry.maxPriceAgeS = 60
+      b.entry.priceBandC = [10, 90]
+      b.size.sizing = 'flat'
+      b.size.maxTradeUsd = 5
+      b.exit = { mode: 'time', targetC: 10, afterMin: 15, atQuarterEnd: true }
+      b.guards.onePositionPerMarket = true
+      b.guards.noOpposingBets = true
+      b.guards.oneEntryPerGame = true
+      b.guards.noEntryFinalS = 120
+      b.pollS = 10
+    })
+  },
   {
     key: 'nba-pick-live',
     name: 'NBA our pick, live',

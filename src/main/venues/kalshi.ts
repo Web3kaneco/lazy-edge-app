@@ -43,8 +43,11 @@ export function kalshiAsk(res: Record<string, any>, side: ContractSide): Quote {
   const no = bids(book.no_dollars ?? book.no)
   const best = (levels: Level[]): Level | null => levels.reduce<Level | null>((a, l) => (!a || l[0] > a[0] ? l : a), null)
   const opposite = best(side === 'yes' ? no : yes)
-  if (!opposite) return { ask: null, askSize: null, priceAgeS: 0 }
-  return { ask: Math.round((1 - opposite[0]) * 100) / 100, askSize: opposite[1], priceAgeS: 0 }
+  // Our side's own best bid, for the widest book a bot will buy into.
+  const own = best(side === 'yes' ? yes : no)
+  const bid = own ? Math.round(own[0] * 100) / 100 : null
+  if (!opposite) return { ask: null, askSize: null, priceAgeS: 0, bid }
+  return { ask: Math.round((1 - opposite[0]) * 100) / 100, askSize: opposite[1], priceAgeS: 0, bid }
 }
 
 // The balance reply, in either shape: integer cents (`balance`,

@@ -11,7 +11,7 @@ import { acceptSideFor, bestQuote, eventOf, fillMatches, fillPosition, pickCombo
 import { createHash } from 'node:crypto'
 import { kalshiFee } from '../rules/fees'
 import { tradingDay } from '@shared/day'
-import { addExitFill, bidFromOtherAsk, exitFee, newExit, paperExitFill, positionPnl, withOrderTotals, type CashOutResult, type TicketExit } from '@shared/exits'
+import { addExitFill, bidFromOtherAsk, exitFee, newExit, paperExitFill, positionPnl, timeExitDue, withOrderTotals, type CashOutResult, type TicketExit } from '@shared/exits'
 import { isLimitGate, type HeldBack, type LimitGate } from '@shared/limits'
 import { rulesOf } from '@shared/review'
 import type { AccountSettings, BotSettings, VenueId } from '@shared/schema'
@@ -445,7 +445,7 @@ export class Supervisor extends EventEmitter {
         await this.bookSlot()
         const fresh = await venue.quote(q.contract, q.side)
         const feeRate = q.venue === 'polymarket' ? await (venue as PolymarketVenue).feeRate(q.contract) : null
-        quotes.push(fresh ? { ...q, ask: fresh.ask, askSize: fresh.askSize, priceAgeS: fresh.priceAgeS, feeRate } : { ...q, priceAgeS: null })
+        quotes.push(fresh ? { ...q, ask: fresh.ask, askSize: fresh.askSize, bid: fresh.bid ?? null, priceAgeS: fresh.priceAgeS, feeRate } : { ...q, priceAgeS: null })
       } catch {
         quotes.push({ ...q, priceAgeS: null }) // unreadable book is stale, never trusted
       }
@@ -614,7 +614,8 @@ export class Supervisor extends EventEmitter {
       botTradesToday: todays(mine).filter((t) => t.status !== 'rejected' && !(t.status === 'cancelled' && t.filledContracts === 0)).length,
       // Only entries that held contracts: an order whose answer was lost keeps
       // its key, so Kalshi still refuses it as a duplicate.
-      entriesToday: todays(mine).filter((t) => t.signalKey === signal.key && t.filledContracts > 0).length
+      entriesToday: todays(mine).filter((t) => t.signalKey === signal.key && t.filledContracts > 0).length,
+      gameEntriesToday: todays(mine).filter((t) => t.filledContracts > 0 && (t.gameId === signal.gameId || t.legs?.some((l) => l.gameId === signal.gameId))).length
     }
   }
 
@@ -648,7 +649,7 @@ export class Supervisor extends EventEmitter {
       // A dry run and a book that never filled hold nothing to sell. Kalshi,
       // and paper priced off Kalshi, can sell; anything else holds to settlement.
       exit: bot.exit.mode !== 'hold' && !d.dryRun && res.ok && res.status !== 'cancelled' && res.status !== 'rejected' && d.priceSource === 'kalshi' && (d.venue === 'paper' || d.venue === 'kalshi')
-        ? newExit(bot.exit.mode, res.avgFillC ?? d.limitPriceC, bot.exit.targetC)
+        ? newExit(bot.exit.mode, res.avgFillC ?? d.limitPriceC, bot.exit.targetC, { now, afterMin: bot.exit.afterMin, atQuarterEnd: bot.exit.atQuarterEnd, period: signal.clock?.period ?? null })
         : null
     }
     ledger.append({ type: 'ticket', ticket })
@@ -748,6 +749,9 @@ export class Supervisor extends EventEmitter {
       if (held < 1 && !exit.pending) { this.recordExit(t, exit, 'everything held has sold'); continue }
       // Cashed out by hand: only an unconfirmed sell is still looked up.
       if (exit.cashout && !exit.pending) continue
+      // A time exit waits for its minutes or its quarter's end, then sells at
+      // the bid whatever the price; a sell already sent is always looked up.
+      if (exit.mode === 'time' && !exit.pending && !timeExitDue(exit, Date.now(), this.clockOf(t))) continue
       try {
         if (t.venue === 'paper') await this.paperExit(t, exit, held)
         // Under the kill switch only the read only lookup of a pending sell runs.
@@ -1087,6 +1091,11 @@ export class Supervisor extends EventEmitter {
     return out
   }
 
+  // The game clock for a ticket, from this cycle's board.
+  private clockOf(t: Ticket): Signal['clock'] {
+    return this.state.board.find((s) => s.gameId === t.gameId && s.clock)?.clock ?? null
+  }
+
   // The bid on the side this ticket holds, from the other side's ask.
   private async bidFor(t: Ticket): Promise<{ bidC: number; size: number } | null> {
     const venue = this.venues[t.venue === 'paper' ? t.priceSource : t.venue]
@@ -1099,7 +1108,7 @@ export class Supervisor extends EventEmitter {
     const bid = await this.bidFor(t)
     const fill = paperExitFill(exit, held, bid)
     if (!fill) return
-    this.recordExit(t, addExitFill(exit, fill), `${exit.mode === 'limit' ? 'limit' : 'mark'} sold ${fill.contracts} @ ${fill.priceC}c (bid ${bid!.bidC}c x ${bid!.size})`)
+    this.recordExit(t, addExitFill(exit, fill), `${exit.mode} sold ${fill.contracts} @ ${fill.priceC}c (bid ${bid!.bidC}c x ${bid!.size})`)
   }
 
   // Every sell is written to the ledger as pending before it is sent, so an
@@ -1172,6 +1181,7 @@ export class Supervisor extends EventEmitter {
       return
     }
     // mark: sell at the bid once it reaches the target, never more than held.
+    // time: the same sell, once it is due, with a target any bid meets.
     if (killed()) return
     const bid = await this.bidFor(t)
     if (!bid || bid.bidC < exit.targetC || killed()) return
@@ -1179,13 +1189,13 @@ export class Supervisor extends EventEmitter {
     this.update(t, { exit: { ...exit, pending: { clientOrderId, timeInForce: 'ioc', sentAt: Date.now() } } })
     const res = await venue.sell({ contract: t.contract, side: t.side, contracts: held, priceC: bid.bidC, timeInForce: 'ioc', clientOrderId })
     if (!res.ok) {
-      if (res.retryable) return this.log(t.botId, t.botName, t.title, 'exit_retry', `mark sell not confirmed: ${res.error}`)
+      if (res.retryable) return this.log(t.botId, t.botName, t.title, 'exit_retry', `${exit.mode} sell not confirmed: ${res.error}`)
       this.update(t, { exit: { ...exit, pending: null } })
-      return this.log(t.botId, t.botName, t.title, 'exit_failed', `mark sell refused: ${res.error}`)
+      return this.log(t.botId, t.botName, t.title, 'exit_failed', `${exit.mode} sell refused: ${res.error}`)
     }
     const cleared: TicketExit = { ...exit, pending: null }
     if (res.filledContracts < 1) return this.update(t, { exit: cleared })
-    this.recordExit(t, addExitFill(cleared, { contracts: res.filledContracts, priceC: res.avgFillC ?? bid.bidC, feeUsd: res.feeUsd }), `mark sold ${res.filledContracts} @ ${res.avgFillC ?? bid.bidC}c`)
+    this.recordExit(t, addExitFill(cleared, { contracts: res.filledContracts, priceC: res.avgFillC ?? bid.bidC, feeUsd: res.feeUsd }), `${exit.mode} sold ${res.filledContracts} @ ${res.avgFillC ?? bid.bidC}c`)
   }
 
   // Writes the exit; once everything held is sold, the ticket closes with its P&L.

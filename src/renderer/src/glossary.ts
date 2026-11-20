@@ -29,7 +29,11 @@ export const GLOSSARY: Section[] = [
     title: 'Exit: how a bot gets out',
     intro: 'Each bot picks one. Whatever an exit has not sold when the market settles is settled like any other position. Exits work on paper and on Kalshi; anything bought elsewhere is held to settlement.',
     terms: [
-      t('Exit', 'How the bot closes a position: hold it to settlement, rest a sell at a set price the moment it fills, or sell at the market once the price reaches that mark.'),
+      t('Exit', 'How the bot closes a position: hold it to settlement, rest a sell at a set price the moment it fills, sell at the market once the price reaches that mark, or sell at the market a set time after the entry, whatever the price.'),
+      t('Sell after', 'With the time exit: minutes after the entry to sell at the bid, whatever the price, and never sooner because the gap closed. On c2 games the market moved toward our number over minutes, not seconds: in the 4th quarter about 3c after 5 minutes and 8c after 15, before costs. A sell that finds no bid tries again each cycle, and what never sells is held to settlement.'),
+      t('Or at the end of the quarter', 'With the time exit: also sell when the quarter the entry was made in ends, if that comes before the minutes are up. With no readable clock only the minutes count.'),
+      t('Widest book', 'The most cents the ask may sit above the bid on the side bought. A wide book costs the spread on the way in and again on the way out, which is what sank 60 second scalps. Leave it empty for no limit. With a limit set, a book whose bid cannot be read is refused. Kalshi books only.'),
+      t('One entry a game', 'Once the bot has bought on a game, it never buys on that game again that day, even after it has sold out. Without it, a bot with an exit may enter the same game again once it has sold.'),
       t('Limit exit', 'The moment the entry fills, the bot rests a sell on the book at the entry price plus your target, for example bought at 55c, sell at 65c. It sells only if a buyer pays that price. On paper it fills once the real bid reaches the price, as a maker.'),
       t('Cash out at the mark', 'The bot watches the book every cycle and sells at the bid the moment the bid reaches the entry price plus your target. It sells only what the bid offers, never more than it holds, and pays the taker fee.'),
       t('Exit target', 'Cents above the entry price to sell at. 10 means bought at 55c, sold at 65c or better, before fees.'),
@@ -66,6 +70,7 @@ export const GLOSSARY: Section[] = [
     title: 'Entry: when a play is good enough',
     terms: [
       t('Buy on', 'What a trade is chosen on. The edge buys where our chance beats the price by the minimum edge and expected value. Our pick buys only the side our number has winning, at the minimum chance and inside the price band, even when the price is above our chance, and the edge and EV minimums are not used. Graded NBA games showed our picks winning more often than we said, so the edge pointed at the other team; on 169 games it is promising and not yet proven, so prove it on paper first. NBA moneylines carry a pick on every game; other plays are bought only when the feed already backs our pick.'),
+      t('Our chance above the price', 'Bots that buy our pick only. The fewest probability points our chance must sit above the price you pay: at 74% and 3 points, the bot pays 71c at most. Leave it empty to buy our pick even when the price is above our chance. The graded NFL season made its money on our pick at 70% or more priced under our number.'),
       t('Edge (pp)', 'Probability points: our chance that the contract pays minus the market\'s. 62% against 55% is a 7pp edge.'),
       t('Minimum edge', 'Plays with a smaller edge than this are skipped.'),
       t('EV after fees', 'Expected profit per contract in cents, after the venue\'s fee and the edge haircut, at the price you would actually pay. A play must clear this to trade.'),
@@ -132,6 +137,7 @@ export const GATES: Record<string, string> = {
   trailing: 'Backs a team further behind than you allow',
   score_unknown: 'Score unreadable',
   position_open: 'Already holds this market',
+  game_entered: 'Already entered this game today',
   opposes_position: 'Would bet against a position it holds',
   max_trades_today: 'Daily trade limit reached',
   bot_drawdown: 'Bot hit its daily drawdown stop',

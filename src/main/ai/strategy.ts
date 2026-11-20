@@ -27,6 +27,8 @@ const Draft = z.object({
   favoritesOnly: z.boolean(),
   buyOurPick: z.boolean(),
   flatSize: z.boolean(),
+  // With buyOurPick: the fewest points our chance must sit above the price; -1 is not used.
+  pickGapPp: z.number(),
   exitMode: ExitMode,
   exitTargetC: z.number(),
   minEvCents: z.number(),
@@ -64,7 +66,7 @@ Rules:
 2. Every default was measured on real fills. If the description asks for something looser than a default, set what they asked and say in the explanation which measured lesson that relaxes.
 3. You only fill settings. You never decide trades, never predict outcomes, and never describe anything as a recommendation.
 4. If the description asks for something these settings cannot express, leave the settings at their defaults for it and list it in unsupported, in the trader's own words.
-5. Probabilities are in probability points (5 means 5pp). Prices are in cents. Money is in dollars. maxTrailingPoints is the most points a team the bot backs may be behind in a live game, every quarter, and -1 means no limit; favoritesOnly backs only the team the market prices to win. buyOurPick buys only the side the Lazy Edge number has winning and ignores minEdgePp and minEvCents; set it only when the description asks to follow our pick or the model's favourite rather than the edge. flatSize makes every trade maxTradeUsd instead of Kelly sizing; a bot with buyOurPick needs it, because Kelly sizes a trade with no edge at nothing.
+5. Probabilities are in probability points (5 means 5pp). Prices are in cents. Money is in dollars. maxTrailingPoints is the most points a team the bot backs may be behind in a live game, every quarter, and -1 means no limit; favoritesOnly backs only the team the market prices to win. buyOurPick buys only the side the Lazy Edge number has winning and ignores minEdgePp and minEvCents; set it only when the description asks to follow our pick or the model's favourite rather than the edge. flatSize makes every trade maxTradeUsd instead of Kelly sizing; a bot with buyOurPick needs it, because Kelly sizes a trade with no edge at nothing. pickGapPp, with buyOurPick, is the fewest points our chance must sit above the price, such as 3 for "priced at least 3 points under our number"; use -1 when the description does not ask for it.
 6. Write the explanation as two or three plain sentences.
 
 Ruleset ${RULESET_VERSION}. Measured defaults:
@@ -110,9 +112,10 @@ export async function draftStrategy(provider: AiProvider, sentence: string, guid
       return { Q1: n, Q2: n, Q3: n, Q4: n }
     })(),
     favoritesOnly: d.favoritesOnly,
-    basis: d.buyOurPick ? 'pick' : 'edge'
+    basis: d.buyOurPick ? 'pick' : 'edge',
+    pickGapPp: d.buyOurPick && d.pickGapPp >= 0 ? Math.min(50, d.pickGapPp) : null
   }
-  bot.exit = { mode: d.exitMode, targetC: Math.round(d.exitTargetC) }
+  bot.exit = { ...bot.exit, mode: d.exitMode, targetC: Math.round(d.exitTargetC) }
   bot.size = {
     ...base.size,
     kellyMultiplier: d.kellyMultiplier,

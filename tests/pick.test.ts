@@ -200,10 +200,49 @@ describe('the 0.9.0 starters', () => {
       if (b.entry.basis === 'pick') expect(b.size.sizing, s.key).toBe('flat')
     }
     expect(new Set(STARTERS.map((s) => s.key)).size).toBe(STARTERS.length)
-    expect(STARTERS.filter((s) => s.build().entry.basis === 'pick').map((s) => s.key)).toEqual(['nba-pick-live', 'nba-pick-pregame'])
+    expect(STARTERS.filter((s) => s.build().entry.basis === 'pick').map((s) => s.key)).toEqual(['kaneco', 'nba-pick-live', 'nba-pick-pregame'])
   })
 
   it('will not raise the edge bar on a bot that buys our pick', () => {
     expect(applyFix(pickBot(), { kind: 'minEdge', pp: 5 })).toMatchObject({ next: null, why: 'it buys our pick and does not use the edge' })
+  })
+})
+
+describe("our chance above the price, and Kaneco's bot, 2026-11-20", () => {
+  const at = (askC: number) => pick({ quotes: [{ venue: 'kalshi', contract: 'KXNBAGAME-99JAN01AAABBB-BBB', side: 'yes', ask: askC / 100, askSize: 500, priceAgeS: 20 }] })
+  const gapBot = () => pickBot((b) => { b.entry.pickGapPp = 3 })
+
+  it('buys our pick only when the price sits the gap under our chance', () => {
+    expect(evaluate(at(77), gapBot(), account(), ctx())).toMatchObject({ kind: 'trade', limitPriceC: 77 })
+    const d = evaluate(at(77), gapBot(), account(), ctx())
+    if (d.kind === 'trade') expect(d.audit.join(' ')).toContain('priced at least 3pp under it')
+    expect(evaluate(at(78), gapBot(), account(), ctx())).toMatchObject({ gate: 'no_venue', detail: 'kalshi:gap 2.0pp under 3pp' })
+    // With the gap off, the same price above our chance is still bought.
+    expect(evaluate(at(85), pickBot(), account(), ctx())).toMatchObject({ kind: 'trade' })
+  })
+
+  it('reads an old pick bot as having no gap', () => {
+    const old = pickBot() as any
+    delete old.entry.pickGapPp
+    expect(BotSettings.parse(old).entry.pickGapPp).toBeNull()
+  })
+
+  it("Kaneco's bot carries the rules as set", () => {
+    const k = STARTERS.find((s) => s.key === 'kaneco')!.build()
+    expect(BotSettings.parse(k)).toBeTruthy()
+    expect(k.name).toBe("Kaneco's bot")
+    expect(k).toMatchObject({
+      enabled: false, mode: 'paper',
+      market: { sports: ['NBA', 'NFL'], lanes: ['MONEYLINE'], phase: 'both' },
+      entry: { basis: 'pick', pickGapPp: 3, priceBandC: [25, 92], minChancePct: { pregame: 70, Q1: 70, Q2: 70, Q3: 70, Q4: 70 } },
+      size: { sizing: 'flat', maxTradeUsd: 5 },
+      exit: { mode: 'hold' },
+      guards: { onePositionPerMarket: true, noOpposingBets: true }
+    })
+    // 74% and 71c is bought at a flat $5; 72c is not.
+    const kb = { ...k, enabled: true, market: { ...k.market, venues: ['kalshi' as const] } }
+    const p74 = (c: number) => pick({ ourP: 0.74, quotes: [{ venue: 'kalshi', contract: 'KXNBAGAME-99JAN01AAABBB-BBB', side: 'yes', ask: c / 100, askSize: 500, priceAgeS: 20 }] })
+    expect(evaluate(p74(71), kb, account(), ctx())).toMatchObject({ kind: 'trade', limitPriceC: 71, contracts: 7 })
+    expect(evaluate(p74(72), kb, account(), ctx())).toMatchObject({ gate: 'no_venue' })
   })
 })

@@ -13,8 +13,9 @@ export const Phase = z.enum(['pregame', 'live', 'both'])
 export const Quarter = z.enum(['Q1', 'Q2', 'Q3', 'Q4'])
 // hold: keep to settlement. limit: rest a sell at entry + target cents the
 // moment the entry fills. mark: watch the book and sell at the bid once it
-// reaches entry + target.
-export const ExitMode = z.enum(['hold', 'limit', 'mark'])
+// reaches entry + target. time: sell at the bid a set number of minutes
+// after the entry, or at the end of its quarter, whatever the price.
+export const ExitMode = z.enum(['hold', 'limit', 'mark', 'time'])
 const chance = z.number().min(0).max(99)
 const trailing = z.number().int().min(0).max(60).nullable()
 export const VenueId = z.enum(['paper', 'kalshi', 'polymarket'])
@@ -121,7 +122,16 @@ export const BotSettings = z.object({
     // inside the price band, with the edge and expected value minimums not
     // used: graded NBA games showed our picks winning more often than we said,
     // so the edge pointed at the other team. Bots saved before 0.9.0 use edge.
-    basis: z.enum(['edge', 'pick']).default('edge')
+    basis: z.enum(['edge', 'pick']).default('edge'),
+    // Bots that buy our pick only (2026-11-20): the fewest points our chance
+    // must sit above the price paid. null is not used, so the price may be
+    // above our chance. The NFL graded season made its money on our pick at
+    // 70% or more priced under our number.
+    pickGapPp: z.number().min(0).max(50).nullable().default(null),
+    // The widest book to buy into (2026-11-20): the ask less the bid on the
+    // side bought, in cents. null is no limit. With a limit set, a book whose
+    // bid cannot be read is refused. Kalshi books only.
+    maxSpreadC: z.number().int().min(1).max(50).nullable().default(null)
   }),
 
   size: z.object({
@@ -146,8 +156,14 @@ export const BotSettings = z.object({
   exit: z.object({
     mode: ExitMode,
     // Cents above the entry price to sell at.
-    targetC: z.number().int().min(1).max(50)
-  }).default({ mode: 'hold', targetC: 10 }),
+    targetC: z.number().int().min(1).max(50),
+    // The time exit (2026-11-20): minutes after the entry to sell at the bid,
+    // and whether the end of the entry's quarter sells it sooner. In game
+    // prices measured on c2 moved toward our number over minutes, not
+    // seconds, and an exit on the gap closing chased noise.
+    afterMin: z.number().int().min(1).max(60).default(15),
+    atQuarterEnd: z.boolean().default(false)
+  }).default({ mode: 'hold', targetC: 10, afterMin: 15, atQuarterEnd: false }),
 
   // With COMBO in the lanes: how many legs, how many combos a day, and
   // whether the plays are taken only as combo legs and never alone.
@@ -164,6 +180,9 @@ export const BotSettings = z.object({
     // Refuses a trade that bets against a position this bot already holds on
     // the same game. Bots saved before 0.4.0 read it as on.
     noOpposingBets: z.boolean().default(true),
+    // One entry a game, all day: once the bot has bought on a game it never
+    // buys on that game again, even after it has sold out.
+    oneEntryPerGame: z.boolean().default(false),
     autoCancelS: z.number().int().min(5).max(3600),
     maxDailyDrawdownUsd: usd,
     maxTradesPerDay: z.number().int().min(1).max(1000)

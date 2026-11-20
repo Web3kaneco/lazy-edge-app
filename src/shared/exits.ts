@@ -10,7 +10,7 @@
 // the bid offers.
 import { FEES } from './ruleset'
 
-export type ExitMode = 'limit' | 'mark'
+export type ExitMode = 'limit' | 'mark' | 'time'
 
 export interface TicketExit {
   mode: ExitMode
@@ -37,6 +37,11 @@ export interface TicketExit {
   // Cashed out by hand: nothing more is sold on its own. What the cash out
   // could not sell is held to settlement.
   cashout?: boolean
+  // A time exit: when it is due, the quarter it was bought in, and whether
+  // that quarter's end makes it due sooner.
+  dueAt?: number
+  period?: number | null
+  atQuarterEnd?: boolean
 }
 
 export interface CashOutResult {
@@ -60,8 +65,24 @@ export function withOrderTotals(exit: TicketExit, order: { contracts: number; av
 
 export const exitTargetC = (entryC: number, targetC: number): number => Math.min(99, Math.round(entryC) + targetC)
 
-export function newExit(mode: ExitMode, entryC: number, targetC: number): TicketExit {
-  return { mode, targetC: exitTargetC(entryC, targetC), status: 'waiting', orderId: null, filledContracts: 0, avgC: null, feeUsd: 0, error: null }
+export interface ExitTiming { now: number; afterMin: number; atQuarterEnd: boolean; period: number | null }
+
+export function newExit(mode: ExitMode, entryC: number, targetC: number, timing?: ExitTiming): TicketExit {
+  const base: TicketExit = { mode, targetC: exitTargetC(entryC, targetC), status: 'waiting', orderId: null, filledContracts: 0, avgC: null, feeUsd: 0, error: null }
+  if (mode !== 'time') return base
+  // A time exit sells at whatever the bid is once due, so any bid meets it.
+  const t = timing ?? { now: Date.now(), afterMin: 15, atQuarterEnd: false, period: null }
+  return { ...base, targetC: 1, dueAt: t.now + t.afterMin * 60_000, period: t.period, atQuarterEnd: t.atQuarterEnd }
+}
+
+// Whether a time exit should sell now: its minutes are up, or it was set to
+// go at the end of its quarter and the clock reads a later period or no time
+// left. An unreadable clock leaves only the minutes. Never due on any other mode.
+export function timeExitDue(exit: TicketExit, now: number, clock: { period: number | null; secondsRemaining: number | null } | null): boolean {
+  if (exit.mode !== 'time') return false
+  if (exit.dueAt === undefined || now >= exit.dueAt) return true
+  if (!exit.atQuarterEnd || exit.period === null || exit.period === undefined || !clock || clock.period === null) return false
+  return clock.period > exit.period || (clock.period === exit.period && clock.secondsRemaining === 0)
 }
 
 // Kalshi's fee, rounded up per order; a maker pays a quarter of the taker fee.
@@ -85,7 +106,7 @@ export function paperExitFill(exit: TicketExit, heldContracts: number, bid: { bi
   const contracts = Math.min(heldContracts, bid.size)
   if (contracts < 1) return null
   const priceC = exit.mode === 'limit' ? exit.targetC : bid.bidC
-  return { contracts, priceC, feeUsd: exitFee(priceC, contracts, exit.mode === 'mark') }
+  return { contracts, priceC, feeUsd: exitFee(priceC, contracts, exit.mode !== 'limit') }
 }
 
 // The exit after one more fill, averaging the price over everything sold.

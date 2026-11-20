@@ -326,7 +326,7 @@ describe('quarters and the chance to hit, 2026-11-16', () => {
     const b = BotSettings.parse(old)
     expect(b.market.quarters).toEqual(['Q1', 'Q2', 'Q3', 'Q4'])
     expect(b.entry.minChancePct).toEqual({ pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 })
-    expect(b.exit).toEqual({ mode: 'hold', targetC: 10 })
+    expect(b.exit).toEqual({ mode: 'hold', targetC: 10, afterMin: 15, atQuarterEnd: false })
   })
 
   it('gives a second entry on the same play its own order id', () => {

@@ -58,7 +58,9 @@ export function defaultBot(id: string, name: string): BotSettings {
       minChancePct: { pregame: 0, Q1: 0, Q2: 0, Q3: 0, Q4: 0 },
       maxTrailing: { Q1: null, Q2: null, Q3: null, Q4: null },
       favoritesOnly: false,
-      basis: 'edge'
+      basis: 'edge',
+      pickGapPp: null,
+      maxSpreadC: null
     },
     size: {
       kellyMultiplier: 0.25, // the strategy plan's kelly_fraction default
@@ -70,7 +72,7 @@ export function defaultBot(id: string, name: string): BotSettings {
       sizing: 'kelly'
     },
     // Held to settlement until the user picks an exit; +10c is John's scalp.
-    exit: { mode: 'hold', targetC: 10 },
+    exit: { mode: 'hold', targetC: 10, afterMin: 15, atQuarterEnd: false },
     // Used only with COMBO in the lanes.
     combo: { legs: 2, maxPerDay: 5, only: false },
     guards: {
@@ -78,6 +80,7 @@ export function defaultBot(id: string, name: string): BotSettings {
       noOvertime: true,
       onePositionPerMarket: true, // the backtest harness
       noOpposingBets: true, // the 2026-11-14 ledger audit: both moneylines, both sides of one rung
+      oneEntryPerGame: false,
       autoCancelS: 120, // UserConfig.auto_cancel_seconds
       maxDailyDrawdownUsd: 50, // UserConfig.max_daily_drawdown_usd
       maxTradesPerDay: 40

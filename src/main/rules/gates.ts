@@ -33,6 +33,8 @@ export interface GateContext {
   // Earlier entries by this bot on this play today. A bot that exited may
   // enter again, and each entry needs its own order id.
   entriesToday?: number
+  // Entries holding contracts by this bot on this game today, for one entry a game.
+  gameEntriesToday?: number
 }
 
 export interface TradeDecision {
@@ -159,6 +161,7 @@ export function preGates(signal: Signal, bot: BotSettings, account: AccountSetti
     const held = ctx.openMarketKeys.has(signal.key) ? signal.key : signal.quotes.find((q) => ctx.openMarketKeys.has(q.contract))?.contract
     if (held) return skip('position_open', held)
   }
+  if (bot.guards.oneEntryPerGame && (ctx.gameEntriesToday ?? 0) > 0) return skip('game_entered', `${ctx.gameEntriesToday} entry today`)
   if (bot.guards.noOpposingBets) {
     for (const q of signal.quotes) {
       const against = opposedBy({ contract: q.contract, side: q.side }, ctx.gamePositions)
@@ -209,7 +212,11 @@ export function evaluate(signal: Signal, bot: BotSettings, account: AccountSetti
   if (!pick && signal.edgePp! < bot.entry.minEdgePp) {
     return skip('min_edge', `${signal.edgePp!.toFixed(2)}pp < ${bot.entry.minEdgePp}pp`)
   }
-  if (pick) audit.push(`basis our pick at ${(signal.ourP * 100).toFixed(1)}%, edge ${signal.edgePp === null ? 'unknown' : `${signal.edgePp.toFixed(1)}pp`} not used`)
+  if (pick) {
+    audit.push(bot.entry.pickGapPp === null
+      ? `basis our pick at ${(signal.ourP * 100).toFixed(1)}%, edge ${signal.edgePp === null ? 'unknown' : `${signal.edgePp.toFixed(1)}pp`} not used`
+      : `basis our pick at ${(signal.ourP * 100).toFixed(1)}%, priced at least ${bot.entry.pickGapPp}pp under it`)
+  }
 
   // 8. Route. Best EV after each venue's own fee, among venues the bot allows,
   // the account enabled, and (when live) the user actually funded.
@@ -304,6 +311,13 @@ function route(
     }
     if (q.ask === null) { reasons.push(`${q.venue}:no_ask`); continue }
     if (q.priceAgeS === null || q.priceAgeS > bot.entry.maxPriceAgeS) { reasons.push(`${q.venue}:stale`); continue }
+    // The widest book: the ask less our side's bid. A bid that cannot be read
+    // is refused, never assumed tight.
+    if (bot.entry.maxSpreadC !== null) {
+      if (q.bid === null || q.bid === undefined) { reasons.push(`${q.venue}:no bid`); continue }
+      const widthC = Math.round((q.ask - q.bid) * 100)
+      if (widthC > bot.entry.maxSpreadC) { reasons.push(`${q.venue}:book ${widthC}c wide`); continue }
+    }
     const askC = q.ask * 100
     const [lo, hi] = bot.entry.priceBandC
     if (askC < lo || askC > hi) { reasons.push(`${q.venue}:band ${askC.toFixed(0)}c`); continue }
@@ -313,6 +327,8 @@ function route(
     const pick = bot.entry.basis === 'pick'
     const edgePp = (signal.ourP! - q.ask) * 100
     if (!pick && edgePp < bot.entry.minEdgePp) { reasons.push(`${q.venue}:edge ${edgePp.toFixed(1)}pp`); continue }
+    // A pick bot may still ask for our chance to sit some points above the price.
+    if (pick && bot.entry.pickGapPp !== null && edgePp < bot.entry.pickGapPp) { reasons.push(`${q.venue}:gap ${edgePp.toFixed(1)}pp under ${bot.entry.pickGapPp}pp`); continue }
 
     // The measured overconfidence haircut, then net EV after this venue's fee.
     const pCal = q.ask + (signal.ourP! - q.ask) * bot.entry.edgeHaircut
