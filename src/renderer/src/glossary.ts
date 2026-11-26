@@ -8,14 +8,31 @@ export interface Section { title: string; intro?: string; terms: Term[] }
 
 const t = (term: string, text: string): Term => ({ term, text })
 
+// The plain name shown for each label code. The code stays what the API sends,
+// the settings save and the export writes; only the screens show the name.
+export const LABEL_NAMES = {
+  PRICE_GAP: 'Priced under our number',
+  MEASURED: 'Proven pattern',
+  LEAN: 'Small gap',
+  RATING_Q: 'Disagrees with sportsbooks',
+  ROLE_Q: 'Player role in question',
+  TAIL_RUNG: 'Side spread line',
+  ILLIQUID: 'Too thin to trade',
+  ROLE_PRICED: 'Role already priced in',
+  UNPRICED: 'No price',
+  NONE: 'No label'
+} as const
+
+export const labelName = (code: string): string => (LABEL_NAMES as Record<string, string | undefined>)[code.toUpperCase()] ?? code
+
 export const GLOSSARY: Section[] = [
   {
     title: 'How a bot works',
     intro: 'A bot is a list of settings. Every cycle the engine reads the Lazy Edge board, rereads the live price for each play the bot covers, and runs it through the checks below in order. The first check that fails stops the trade and is written down with its reason. A play that passes every check is placed. Nothing else decides.',
     terms: [
-      t('Paper', 'Trades a local practice ledger against the real order books. No money moves. Paper results show what your settings would have done at prices that really existed.'),
-      t('Live', 'Sends real orders to the venues you picked. Still obeys the account\'s dry run switch and the kill switch.'),
-      t('Dry run', 'An account wide switch. Live bots go through every step and record the exact order they would send, but send nothing. It is on until you turn it off on the Account screen.'),
+      t('Paper', 'Trades a local practice ledger against the real order books. No money moves. Paper results show what your settings would have done at prices that really existed. A paper bot never stops for its daily trade count or loss stop, so a test runs the whole night.'),
+      t('Live', 'Sends real orders with your money to the venues you have a key for. The bot\'s mode is the only switch: pick Live and it trades, and only the kill switch stops it. A live bot that cannot trade, with no key or no balance, says so in red.'),
+      t('Honest chance', 'The chance every bot check reads. It starts as our number and is only ever lowered. In NBA games from the 3rd quarter, when a team is down 5 or more, it is pulled halfway down to how often teams in that exact spot really came back. Then, once at least 10 of your own plays like it have settled, it is lowered if they won less often than we said. The edge, the minimum chance and Kelly sizing all use it, so a trailing team whose edge comes only from a hopeful number stops passing. The Board shows both numbers and why.'),
       t('Kill switch', 'Stops every live order at once and cancels any order still waiting to fill, exit sells included. Paper bots keep running.'),
       t('Day profit lock', 'Cash out all, done for you. Set on the Account screen: once the day is up your target percent, the app cashes out on its own, at once or after the day gives back a set number of points from its best. It watches live money or paper and sells only what it watches: a paper lock never touches a live position. It measures the day against the account value at its first reading, and fires at most once a day while the engine runs.'),
       t('Cash out all','Locks in where you are, across every bot at once. Every bot is switched off, the kill switch goes on, and every open position, live and paper, is sold now at the best bid, as far as the bid goes. You can choose to sell only positions in profit. Whatever cannot be sold is held to settlement, and the app lists each one and why.'),
@@ -55,15 +72,15 @@ export const GLOSSARY: Section[] = [
       t('Quarters','In game plays trade only in the quarters you tick, so you choose the quarter a bot starts in. Untick Q1 to start in the second quarter. Pregame plays are not affected, and overtime follows No entries in overtime.'),
       t('Phase','Pregame trades only before kickoff or tip: once a game starts, or its start cannot be read, its plays count as live. Live trades during the game, which includes NFL hot plays and NBA live edges. Both does both.'),
       t('Hot play', 'A live NFL edge that met Lazy Edge\'s hot plays rule during a game. Bots set to Live or Both phase can trade them.'),
-      t('Labels', 'Every board row is labelled by how its edge was found. A bot only trades labels you switch on.'),
-      t('PRICE_GAP', 'Our probability clears the venue\'s ask by 3 or more points on a tight quote.'),
-      t('RATING_Q', 'Our number and the consensus of eleven sportsbooks disagree by 5 or more total points or 4 or more spread points. A disagreement with the books, not a price gap.'),
-      t('LEAN', 'A smaller gap.'),
-      t('TAIL_RUNG', 'A line away from the venue\'s main line. Ranked, but never the headline play.'),
-      t('ROLE_Q', 'Lazy Edge and the venue disagree on a player\'s role, a depth chart question.'),
-      t('MEASURED', 'An edge Lazy Edge has measured in real results, such as the market under reacting after a turnover.'),
-      t('ILLIQUID, ROLE_PRICED, UNPRICED', 'Shown by the API but never ranked. No bot can trade them.'),
-      t('Venues', 'Where the bot may trade. When more than one has the contract, the best price after fees wins. A live bot skips a venue that has no usable balance.')
+      t('Labels', 'Every play arrives with a label saying why it is on the board. A bot trades only the labels switched on. Nearly every NBA play, moneylines, picks, props and the best spread line, arrives as Priced under our number, so an NBA bot needs that one on. The API and the export use the short codes shown in each tip.'),
+      t(LABEL_NAMES.PRICE_GAP, 'Our chance that the contract pays is above its price. Nearly every play carries it: every NBA moneyline, pick, prop and best spread line, NFL board rows and live plays, and MLB edges, so switching it off stops almost everything. How big the gap must be is set by Minimum edge, or by Our chance above the price on a bot that buys our pick. On the NFL board the API gives it only to a gap of 3 or more points on a tight quote. Code PRICE_GAP.'),
+      t(LABEL_NAMES.MEASURED, 'A situation Lazy Edge has tracked in graded results and found the market slow to price, such as the market under reacting after an NFL turnover. Comes with NFL live plays and MLB totals. Code MEASURED.'),
+      t(LABEL_NAMES.LEAN, 'Our number and the market differ, but by less than a price gap. NFL board rows and MLB totals outside the measured pattern. Code LEAN.'),
+      t(LABEL_NAMES.RATING_Q, 'Our number and the consensus of eleven sportsbooks disagree by 5 or more total points or 4 or more spread points. A disagreement with the books rather than a price on a venue, so most of these rows have nothing to buy. NFL board only. Code RATING_Q.'),
+      t(LABEL_NAMES.ROLE_Q, 'Lazy Edge and the venue disagree on how much a player will play, a depth chart question. NFL board only. Code ROLE_Q.'),
+      t(LABEL_NAMES.TAIL_RUNG, 'An NBA spread line away from the best one. Each game\'s spread ladder has one best line, which arrives as Priced under our number; every other line arrives as this. Code TAIL_RUNG.'),
+      t('Too thin, already priced in, no price', 'Shown by the API but never ranked, and no bot can trade them: the book is too thin to trade (ILLIQUID), the market has already priced in the player\'s role (ROLE_PRICED), or there is no price to buy at (UNPRICED).'),
+      t('Venues', 'Where the bot prices and trades, among the venues you have saved a key for. A venue with no key is greyed out; with one key, that venue is always used. When both have the contract, the best price after fees wins. A live bot skips a venue that has no usable balance.')
     ]
   },
   {
@@ -111,50 +128,13 @@ export const GLOSSARY: Section[] = [
   }
 ]
 
-// The Board's verdicts: why a bot would not take a play, by the gate's name.
-export const GATES: Record<string, string> = {
-  kill_switch: 'The kill switch is on',
-  sport_not_enabled: 'Sport is off for this bot',
-  lane_not_enabled: 'Lane is off for this bot',
-  phase_not_enabled: 'Phase is off for this bot',
-  label_never_traded: 'This label is never traded',
-  label_not_enabled: 'Label is off for this bot',
-  not_measured: 'Not a measured edge',
-  no_trigger: 'No game event trigger',
-  side_unresolved: 'Could not tell which side to buy, so refused',
-  no_reading: 'No price yet',
-  min_edge: 'Edge is under your minimum',
-  clock_unknown: 'Game clock unreadable',
-  overtime: 'Overtime',
-  final_seconds: 'Too close to the end',
-  quarter_not_enabled: 'Quarter is off for this bot',
-  quarter_unknown: 'Quarter unreadable',
-  min_chance: 'Chance to hit is under your minimum',
-  not_favorite: 'Backs the team the market expects to lose',
-  not_our_pick: 'Not our pick: our number has this side losing',
-  pick_only: 'Our pick, for bots that buy on our pick',
-  favorite_unknown: 'Could not read which team is favored',
-  trailing: 'Backs a team further behind than you allow',
-  score_unknown: 'Score unreadable',
-  position_open: 'Already holds this market',
-  game_entered: 'Already entered this game today',
-  opposes_position: 'Would bet against a position it holds',
-  max_trades_today: 'Daily trade limit reached',
-  bot_drawdown: 'Bot hit its daily drawdown stop',
-  account_drawdown: 'Account hit its daily drawdown stop',
-  no_venue: 'No venue passes',
-  no_bankroll: 'No bankroll to size against',
-  kelly_zero: 'No edge left after the haircut',
-  size_too_small: 'Trade too small to place',
-  game_cap: 'Would exceed the per game limit',
-  account_exposure: 'Would exceed the account exposure limit',
-  agent_declined: 'The agent declined'
-}
+export { GATES } from '@shared/gatewords'
 
 const INDEX = new Map(GLOSSARY.flatMap((s) => s.terms.map((x) => [x.term.toLowerCase(), x.text] as const)))
 
 // The tip for a term, by its name as shown, or '' when the glossary has none.
 // tests/glossary.test.ts checks every term the screens use exists.
+// A label code (PRICE_GAP) finds the tip of its plain name.
 export function tip(term: string): string {
-  return INDEX.get(term.toLowerCase()) ?? ''
+  return INDEX.get(term.toLowerCase()) ?? INDEX.get(labelName(term).toLowerCase()) ?? ''
 }

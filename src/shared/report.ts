@@ -46,7 +46,8 @@ export interface ReportInput {
     version: string
     os: string
     engineRunning: boolean
-    executionMode: string
+    // Bots switched on in live mode, the only live switch.
+    liveBots: number
     killSwitch: boolean
     lastError: string | null
   }
@@ -82,7 +83,7 @@ export function buildReport(r: ReportInput): string {
 
   section('App')
   out.push(`Version ${r.app.version} on ${r.app.os}`)
-  out.push(`Engine ${r.app.engineRunning ? 'running' : 'stopped'}, ${r.app.executionMode === 'live' ? 'live money' : 'dry run'}, kill switch ${r.app.killSwitch ? 'on' : 'off'}`)
+  out.push(`Engine ${r.app.engineRunning ? 'running' : 'stopped'}, ${r.app.liveBots ? `${r.app.liveBots} live ${r.app.liveBots === 1 ? 'bot' : 'bots'}` : 'paper only'}, kill switch ${r.app.killSwitch ? 'on' : 'off'}`)
   if (r.app.lastError) out.push(`Last error: ${r.app.lastError}`)
 
   if (r.play) {

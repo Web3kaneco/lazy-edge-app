@@ -1,16 +1,36 @@
 import { useEffect, useMemo, useState } from 'react'
 import { defaultBot } from '@shared/ruleset'
 import { limitsSummary } from '@shared/limits'
-import { Lane, Phase, ProviderId, Quarter, Sport, TradeableLabel, VenueId, type AccountSettings, type BotSettings } from '@shared/schema'
+import { BotSettings as BotSettingsDoc, Lane, Phase, PropSide, ProviderId, Quarter, Sport, TradeableLabel, type AccountSettings, type BotSettings } from '@shared/schema'
+import { auditBots, type Finding } from '@shared/audit'
+import { botSentence } from '@shared/sentence'
+import { botVenues, liveProblem, REAL_VENUES, VENUE_NAMES, type RealVenue } from '@shared/venues'
 import { changesFromDefaults, readShareCode, shareCode, type Change } from '@shared/share'
-import { STARTERS, starterOf } from '@shared/starters'
-import { api, type StrategyResult } from '../api'
-import { tip } from '../glossary'
-import { Chips, Field, NumberField, Tip, Toggle } from '../ui'
+import { STARTERS, starterChanges, starterOf } from '@shared/starters'
+import { changeLines } from '@shared/fields'
+import { api, useEngine, type ChatReply, type StarterStatus, type StrategyResult, type Ticket, type WhyAnswer } from '../api'
+import { Proposal } from '../Ask'
+import { botProblems } from '@shared/validate'
+import { botRisk, flatRiskNote } from '@shared/risk'
+import { labelName, tip } from '../glossary'
+import { Chips, Field, NumberField, Segments, Tip, Toggle } from '../ui'
 
 const M = defaultBot('m', 'm') // the measured defaults, for the hints
 
-export function Bots() {
+// The settings Advanced holds: every leaf of the document but the name, the
+// on switch, paper or live, and the two money controls on the card.
+const ON_CARD = new Set(['name', 'enabled', 'mode', 'size.maxTradeUsd', 'guards.maxDailyDrawdownUsd'])
+function settingCount(b: BotSettings): number {
+  let n = 0
+  const walk = (o: unknown, path: string): void => {
+    if (o && typeof o === 'object' && !Array.isArray(o)) { for (const [k, v] of Object.entries(o)) walk(v, path ? `${path}.${k}` : k); return }
+    if (!['id', 'trial'].includes(path.split('.')[0]!) && !ON_CARD.has(path)) n++
+  }
+  walk(b, '')
+  return n
+}
+
+export function Bots({ advancedOpen = false }: { advancedOpen?: boolean }) {
   const [bots, setBots] = useState<BotSettings[]>([])
   const [edit, setEdit] = useState<BotSettings | null>(null)
   const [dirty, setDirty] = useState(false)
@@ -18,12 +38,21 @@ export function Bots() {
   const [saved, setSaved] = useState('')
   const [sharing, setSharing] = useState(false)
   const [account, setAccount] = useState<AccountSettings | null>(null)
+  const engine = useEngine()
   useEffect(() => setSharing(false), [edit?.id])
-  useEffect(() => { void api.account().then(setAccount) }, [])
+  useEffect(() => { void api.account().then(setAccount) }, [engine?.limits.capUsd])
+  const venueState = engine?.venues ?? {}
+  const keyed = REAL_VENUES.filter((v) => venueState[v]?.configured)
+  const problem = (b: BotSettings): string | null => account ? liveProblem(b, account, venueState) : null
 
+  const [starters, setStarters] = useState<Record<string, StarterStatus>>({})
+  // The last 30 days of trades, for each bot's risk and reward.
+  const [tickets, setTickets] = useState<Ticket[]>([])
+  useEffect(() => { void api.tickets(30).then(setTickets).catch(() => {}) }, [])
   const load = async (select?: string): Promise<void> => {
     const list = await api.bots()
     setBots(list)
+    setStarters(await api.starters())
     const pick = list.find((b) => b.id === (select ?? edit?.id)) ?? list[0] ?? null
     setEdit(pick ? structuredClone(pick) : null)
     setDirty(false)
@@ -59,37 +88,78 @@ export function Bots() {
     await load(edit?.id)
   }
 
+  // What the card must say in red or amber: anything in Advanced that stops
+  // the bot or cancels what its sentence says (CLAUDE.md rule 3). The audit
+  // runs on the card as edited, switched on, so an off bot shows what would
+  // stop it once it is on; checks naming two bots show on both.
+  const findings = useMemo((): Finding[] => {
+    if (!edit || !account) return []
+    const asOn = { ...edit, enabled: true }
+    const all = auditBots({ bots: [...bots.filter((b) => b.id !== edit.id), asOn], account, venues: venueState, engineRunning: true, tickets })
+    return all.filter((f) => f.botId === edit.id || (f.botId === null && f.text.includes(edit.name)))
+  }, [edit, bots, account, venueState, tickets])
+  const starter = edit ? starterOf(edit.id) : undefined
+  const changed = edit ? (starter ? starterChanges(edit, BotSettingsDoc.parse(starter.build())).length : changesFromDefaults(edit).length) : 0
+  const savedBot = edit ? bots.find((b) => b.id === edit.id) : undefined
+  const problems = useMemo(() => (edit ? botProblems(edit) : []), [edit])
+
   return (
     <>
-      <h1>Bots</h1>
-      <p className="lede">Each bot is a settings document. The engine follows it exactly and refuses anything it does not recognise. Every number shows its measured default; an amber hint means you have moved off what was measured. Hover any ? for what a setting means, or open Help for every term.</p>
+      <p className="lede">Each bot follows its settings exactly. Its card says what it does in one line and keeps the few settings that matter most in view; every other setting is under Advanced, and anything there that stops the bot shows on the card in red.</p>
       <div className="split">
         <div className="grid" style={{ alignContent: 'start', gap: 14 }}>
-        <BotList bots={bots} selected={edit?.id ?? null} onCreate={create} onToggle={(b, v) => void toggle(b, v)}
+        <BotList bots={bots} problem={problem} selected={edit?.id ?? null} onCreate={create} onToggle={(b, v) => void toggle(b, v)}
           onSelect={(b) => { if (!dirty || confirm('Discard unsaved changes?')) { setEdit(structuredClone(b)); setDirty(false) } }} />
-        <PaperTest onDone={() => load(edit?.id)} />
-        <Starters have={new Set(bots.map((b) => b.id))} onAdd={async (b) => { await api.saveBot(b); await load(b.id) }} />
-        <Import onAdd={async (b) => {
-          // A name already in the list gets a suffix, so the two are never confused.
-          const named = bots.some((x) => x.name === b.name) ? { ...b, name: `${b.name} (imported)`.slice(0, 80) } : b
-          await api.saveBot(named); await load(named.id); setSaved(`Imported "${named.name}". It is off and in paper until you switch it on.`)
-        }} />
+        <details className="advanced">
+          <summary>Add or test bots <span className="meta">starters, paper test, import</span></summary>
+          <div className="grid" style={{ gap: 14 }}>
+            <Starters have={new Set(bots.map((b) => b.id))} onAdd={async (b) => { await api.saveBot(b); await load(b.id) }} />
+            <PaperTest onDone={() => load(edit?.id)} />
+            <Import onAdd={async (b) => {
+              // A name already in the list gets a suffix, so the two are never confused.
+              const named = bots.some((x) => x.name === b.name) ? { ...b, name: `${b.name} (imported)`.slice(0, 80) } : b
+              await api.saveBot(named); await load(named.id); setSaved(`Imported "${named.name}". It is off and in paper until you switch it on.`)
+            }} />
+          </div>
+        </details>
         </div>
 
         {edit && (
           <div className="card">
-            {starterOf(edit.id) && <div className="note" style={{ marginBottom: 12 }}><b>Starter bot.</b> {starterOf(edit.id)!.summary} Change anything you like; it is yours.</div>}
-            <Describe onUse={(d) => { setEdit({ ...d.bot, id: edit.id }); setDirty(true) }} />
+            <div className="bot-head">
+              <input className="name-input" type="text" aria-label="Bot name" value={edit.name} onChange={(e) => set((b) => { b.name = e.target.value })} style={{ flex: 1, minWidth: 0 }} />
+              {/* Saved at once like the list's switch; with unsaved edits it waits for Save. */}
+              <Toggle on={edit.enabled} label={edit.enabled ? 'On' : 'Off'} onChange={(v) => { if (dirty || !savedBot) set((b) => { b.enabled = v }); else void toggle(savedBot, v) }} />
+            </div>
+            <p className="sentence">{botSentence(edit)}</p>
+            {findings.map((f) => (
+              <div key={f.text} className={`conflict ${f.level === 'check' ? 'soft' : ''}`}>
+                <span className="mark">{f.level === 'problem' ? '!' : '•'}</span>
+                <span>{f.text}{f.fix && <span className="fix">To change it: {f.fix}</span>}</span>
+              </div>
+            ))}
+            {edit.enabled && engine && !engine.running && <div className="conflict"><span className="mark">!</span><span>The engine is stopped, so no bot trades, paper or live.<span className="fix">Press Start at the top.</span></span></div>}
+            {edit.trial && <div className="note warn" style={{ marginBottom: 12 }}><b>A paper trial.</b> This copy of {bots.find((b) => b.id === edit.trial!.of)?.name ?? 'another bot'} tests: {edit.trial.what}. Compare the two under Home, Suggestions, then accept the change onto the bot or drop it.</div>}
 
+            <div className="simple-grid">
+              <Field label="Money" tip={`Paper: ${tip('Paper')} Live: ${tip('Live')}`} hint={edit.mode === 'live'
+                ? `Real orders with your money${keyed.length ? ` on ${botVenues(edit, keyed).map((v) => VENUE_NAMES[v]).join(' or ')}` : ''}.`
+                : 'Practice money against real prices.'}>
+                <Segments options={['Paper', 'Live'] as const} value={edit.mode === 'live' ? 'Live' : 'Paper'} onChange={(v) => set((b) => { b.mode = v === 'Live' ? 'live' : 'paper' })} />
+              </Field>
+              <NumberField label={edit.size.sizing === 'flat' ? 'Amount per trade' : 'Largest trade'} tip={tip('Maximum per trade')} suffix="$" step={1} value={edit.size.maxTradeUsd} measured={M.size.maxTradeUsd} onChange={(v) => set((b) => { b.size.maxTradeUsd = v })} />
+              <NumberField label="Daily loss stop" tip={tip('Daily drawdown stop')} suffix="$" step={5} value={edit.guards.maxDailyDrawdownUsd} measured={M.guards.maxDailyDrawdownUsd} why="Live only. Settled losses after fees since 4 AM." onChange={(v) => set((b) => { b.guards.maxDailyDrawdownUsd = v })} />
+            </div>
+
+            <AskAi bot={edit} onSaved={async (id, msg) => { await load(id); setSaved(msg) }} />
+            {starter && <StarterNote bot={edit} status={starters[edit.id]} onDone={async (msg) => { await load(edit.id); setSaved(msg) }} />}
+            {saved && <p className="small good" style={{ marginTop: 0 }}>{saved}</p>}
+
+            <details className="advanced" key={`${edit.id}-${advancedOpen}`} open={advancedOpen || undefined}>
+            <summary>Advanced <span className="meta">{settingCount(edit)} settings, {changed === 0 ? 'all as' : `${changed} changed from`} {starter ? 'the starter' : 'the measured defaults'}</span></summary>
+            <p className="small muted" style={{ marginTop: 0 }}>Every number shows its measured default; an amber hint means it has moved off what was measured. Hover any ? for what a setting means.</p>
             <div className="section">Basics</div>
             <div className="grid cols-2">
-              <Field label="Name"><input type="text" value={edit.name} onChange={(e) => set((b) => { b.name = e.target.value })} /></Field>
-              <Field label="Mode" tip={`Paper: ${tip('Paper')} Live: ${tip('Live')}`} hint="Paper trades a local ledger against real books. Live sends real orders, still subject to dry run and the kill switch.">
-                <select value={edit.mode} onChange={(e) => set((b) => { b.mode = e.target.value as BotSettings['mode'] })}>
-                  <option value="paper">Paper</option>
-                  <option value="live">Live</option>
-                </select>
-              </Field>
               <Field label="Decider" tip={`Rules engine: ${tip('Rules engine')} Agent: ${tip('Agent')}`} hint="Rules decides every trade from the numbers. Agent lets a model decline trades that already passed every rule; it can never add one.">
                 <select value={edit.decider.kind} onChange={(e) => set((b) => { b.decider.kind = e.target.value as 'rules' | 'agent' })}>
                   <option value="rules">Rules engine</option>
@@ -131,13 +201,53 @@ export function Bots() {
                   <Chips options={Quarter.options} value={edit.market.quarters} onChange={(v) => set((b) => { b.market.quarters = Quarter.options.filter((q) => v.includes(q)) })} />
                 </Field>
               )}
-              <Field label="Labels" tip={tip('Labels')} hint="ILLIQUID, ROLE_PRICED and UNPRICED are never traded and cannot be enabled."><Chips options={TradeableLabel.options} tips={tip} value={edit.market.labels} onChange={(v) => set((b) => { b.market.labels = v })} /></Field>
-              <Field label="Venues" tip={tip('Venues')} hint="Best price after fees wins among these. A live bot skips any venue without a usable balance."><Chips options={VenueId.options} value={edit.market.venues} onChange={(v) => set((b) => { b.market.venues = v })} /></Field>
+              {edit.market.lanes.includes('PROP') && (
+                <Field label="Props on the game's top players only" tip="Trades a player's props only when he ranks this high or better in his game by our points projection, so it backs the players carrying the game, not role players. 10 means the top 10 of both teams together. Empty trades every player." hint={edit.market.propTopPlayers === null
+                  ? 'Off: every player with a prop is traded.'
+                  : `Only the top ${edit.market.propTopPlayers} players in each game, by our points projection.`}>
+                  <input type="number" min={1} max={30} step={1} placeholder="off" value={edit.market.propTopPlayers ?? ''} style={{ width: 120 }}
+                    onChange={(e) => set((b) => { const v = e.target.value === '' ? null : Math.round(Number(e.target.value)); b.market.propTopPlayers = v === null || !Number.isFinite(v) ? null : Math.min(30, Math.max(1, v)) })} />
+                </Field>
+              )}
+              {edit.market.lanes.includes('PROP') && (
+                <Field label="Prop sides switched off" tip="A ticked stat and side is never bought by this bot. Across 503 graded props to 23 November, rebound unders hit 54% where we said 70% and lost $101 over 83, while rebound overs made $34 over 80." hint={edit.market.propSidesOff.length === 0
+                  ? 'None: every stat and side is bought.'
+                  : `Never buys ${edit.market.propSidesOff.join(', ')}.`}>
+                  <Chips options={PropSide.options} value={edit.market.propSidesOff} onChange={(v) => set((b) => { b.market.propSidesOff = PropSide.options.filter((o) => v.includes(o)) })} />
+                </Field>
+              )}
+              <Field label="Labels" tip={tip('Labels')} hint="Too thin to trade, Role already priced in and No price are never traded and cannot be switched on."><Chips options={TradeableLabel.options} tips={tip} names={labelName} value={edit.market.labels} onChange={(v) => set((b) => { b.market.labels = v })} /></Field>
+              <Field label="Venues" tip={tip('Venues')} hint={keyed.length === 0
+                ? 'No Kalshi or Polymarket key is saved. Paper still prices off the public books; add a key on the Keys screen to trade live.'
+                : keyed.length === 1
+                  ? `${VENUE_NAMES[keyed[0]!]} is the only venue with a key, so every price and order uses it.`
+                  : 'Best price after fees wins among the venues ticked. Tick none to use both.'}>
+                <Chips<RealVenue>
+                  options={REAL_VENUES}
+                  names={(v) => VENUE_NAMES[v]}
+                  value={botVenues(edit, keyed)}
+                  locked={(v) => keyed.includes(v) ? (keyed.length === 1 ? `${VENUE_NAMES[v]} is your only venue with a key, so it is always used.` : null) : `No ${VENUE_NAMES[v]} key is saved. Add one on the Keys screen to use it.`}
+                  onChange={(v) => set((b) => { b.market.venues = v })}
+                />
+              </Field>
             </div>
             {edit.market.lanes.includes('COMBO') && (
               <>
                 <div className="grid cols-2" style={{ marginTop: 10 }}>
-                  <NumberField label="Legs per combo" tip={tip('COMBO')} step={1} min={2} max={4} value={edit.combo.legs} measured={M.combo.legs} onChange={(v) => set((b) => { b.combo.legs = Math.round(v) })} />
+                  <Field label="Which combos" hint={edit.combo.source === 'api'
+                    ? "The API's own combos, bought as they are: NBA tickets once they lock, and NFL slips and same-game pairs mapped to Kalshi's prop markets, ranked by our chance over the legs one by one, one combo a day per player. Only the largest trade, the combos a day and paper or live apply; legs per combo and the entry settings are not used."
+                    : "Ties this bot's own plays together into one Kalshi combo."}>
+                    <select value={edit.combo.source} onChange={(e) => set((b) => { b.combo.source = e.target.value as 'built' | 'api' })}>
+                      <option value="built">Built from this bot's plays</option>
+                      <option value="api">The API's combos (NBA tickets, NFL slips)</option>
+                    </select>
+                  </Field>
+                  {edit.combo.source === 'api'
+                    ? <Field label="Buy the API's combos with" hint={`Each is bought exactly as the API built it. ${edit.combo.apiLegs.length === 3 ? 'Every size is ticked.' : `Only ${[...edit.combo.apiLegs].sort().join(' and ')} leg combos.`}`}>
+                        <Chips options={['2', '3', '4'] as const} names={(o) => `${o} legs`} value={edit.combo.apiLegs.map(String) as ('2' | '3' | '4')[]}
+                          onChange={(v) => set((b) => { b.combo.apiLegs = v.map(Number).sort() as (2 | 3 | 4)[] })} />
+                      </Field>
+                    : <NumberField label="Legs per combo" tip={tip('COMBO')} step={1} min={2} max={4} value={edit.combo.legs} measured={M.combo.legs} onChange={(v) => set((b) => { b.combo.legs = Math.round(v) })} />}
                   <NumberField label="Combos per day" step={1} min={1} max={50} value={edit.combo.maxPerDay} measured={M.combo.maxPerDay} onChange={(v) => set((b) => { b.combo.maxPerDay = Math.round(v) })} />
                 </div>
                 <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>
@@ -173,10 +283,68 @@ export function Bots() {
                 <NumberField label="Minimum edge" tip={`${tip('Minimum edge')} ${tip('Edge (pp)')}`} suffix="pp" step={0.5} value={edit.entry.minEdgePp} measured={M.entry.minEdgePp} why="UserConfig.min_edge_threshold." onChange={(v) => set((b) => { b.entry.minEdgePp = v })} />
                 <NumberField label="Minimum EV after fees" tip={tip('EV after fees')} suffix="cents" step={0.1} value={edit.entry.minEvCents} measured={M.entry.minEvCents} why="Replaced price caps on 2026-08-31." onChange={(v) => set((b) => { b.entry.minEvCents = v })} />
               </>}
+              <Field label="Maximum edge" tip="Our chance minus the price the order would pay, as the most a bot will believe. Far above the market usually means the market knows something our number does not: across 183 settled live bets, edges above 15 points won 9 of 23. Empty is no limit." hint={edit.entry.maxEdgePp === null
+                ? 'Off: no play is too good to take.'
+                : `Skips a play when our chance is more than ${edit.entry.maxEdgePp} points above the price.`}>
+                <input type="number" min={1} max={100} step={0.5} placeholder="off" value={edit.entry.maxEdgePp ?? ''} style={{ width: 120 }}
+                  onChange={(e) => set((b) => { const v = e.target.value === '' ? null : Number(e.target.value); b.entry.maxEdgePp = v === null || !Number.isFinite(v) ? null : Math.min(100, Math.max(1, v)) })} />
+              </Field>
+              {edit.market.lanes.includes('PROP') && (() => {
+                const band = edit.entry.underEdgePp
+                const lo = band ? Math.max(band[0], edit.entry.basis === 'edge' ? edit.entry.minEdgePp : 0) : null
+                const hi = band ? Math.min(band[1], edit.entry.maxEdgePp ?? Infinity) : null
+                const empty = lo !== null && hi !== null && lo > hi
+                const narrowed = band !== null && (lo !== band[0] || hi !== band[1])
+                return (
+                  <Field label="Prop unders only at an edge of" tip="Holds player prop unders to their own edge range, at the price the order pays. Overs keep the bot's minimum and maximum edge. Across 280 graded unders to 23 November, 5 to 7 points was the one range that made money. The bot's minimum and maximum edge still apply, so this can only narrow them. Empty holds unders to the bot's own edges." hint={band === null
+                    ? "Off: unders use the bot's own edges."
+                    : empty
+                      ? <span className="bad">No under can pass: the bot's own edges ({edit.entry.minEdgePp} to {edit.entry.maxEdgePp ?? 'no limit'}) leave nothing inside {band[0]} to {band[1]}.</span>
+                      : narrowed
+                        ? <span className="bad">Unders actually trade at {lo} to {hi === Infinity ? 'no limit' : hi} points: the bot's own minimum or maximum edge is tighter than {band[0]} to {band[1]}.</span>
+                        : `Unders only when our chance is ${band[0]} to ${band[1]} points above the price.`}>
+                    <div className="row">
+                      <input type="number" min={0} max={50} step={0.5} placeholder="off" value={band?.[0] ?? ''} style={{ width: 90 }}
+                        onChange={(e) => set((b) => { const v = e.target.value === '' ? null : Number(e.target.value); b.entry.underEdgePp = v === null || !Number.isFinite(v) ? null : [Math.min(50, Math.max(0, v)), Math.max(v, b.entry.underEdgePp?.[1] ?? v + 2)] })} />
+                      <span className="muted">to</span>
+                      <input type="number" min={0} max={100} step={0.5} placeholder="off" value={band?.[1] ?? ''} style={{ width: 90 }}
+                        onChange={(e) => set((b) => { const v = e.target.value === '' ? null : Number(e.target.value); b.entry.underEdgePp = v === null || !Number.isFinite(v) ? null : [Math.min(b.entry.underEdgePp?.[0] ?? 0, v), Math.min(100, Math.max(0, v))] })} />
+                    </div>
+                  </Field>
+                )
+              })()}
+              {edit.market.lanes.includes('PROP') && edit.market.phase !== 'pregame' && (
+                <Field label="In game prop unders only in the first" tip="Buys an in game prop under only in the first this many minutes of a quarter; overs and pregame props are not held to it. Live unders bought in the first 2 minutes of the 3rd quarter won 11 of 12 to 23 November, while those bought 8 or more minutes in hit 59% against our 81% and lost $22.49 over 27. A small sample: a test, not a proven rule. Empty buys unders at any point of the quarter." hint={edit.entry.underFirstMin === null
+                  ? 'Off: unders at any point of the quarter.'
+                  : `Unders only in the first ${edit.entry.underFirstMin} minutes of each quarter the bot trades.`}>
+                  <div className="row">
+                    <input type="number" min={1} max={15} step={1} placeholder="off" value={edit.entry.underFirstMin ?? ''} style={{ width: 90 }}
+                      onChange={(e) => set((b) => { const v = e.target.value === '' ? null : Number(e.target.value); b.entry.underFirstMin = v === null || !Number.isFinite(v) ? null : Math.min(15, Math.max(1, v)) })} />
+                    <span className="muted">minutes of a quarter</span>
+                  </div>
+                </Field>
+              )}
               <NumberField label="Edge haircut" tip={tip('Edge haircut')} step={0.05} min={0} max={1} value={edit.entry.edgeHaircut} measured={M.entry.edgeHaircut} why="811 graded fills: our p ≥ 0.75 bucket won 62%. 1.0 trades the raw claimed edge." onChange={(v) => set((b) => { b.entry.edgeHaircut = v })} />
               <NumberField label="Maximum price age" tip={tip('Maximum price age')} suffix="s" value={edit.entry.maxPriceAgeS} measured={M.entry.maxPriceAgeS} max={180} why="The API nulls an edge against a price older than 180s." onChange={(v) => set((b) => { b.entry.maxPriceAgeS = v })} />
               <NumberField label="Price band low" tip={tip('Price band')} suffix="cents" value={edit.entry.priceBandC[0]} measured={M.entry.priceBandC[0]} min={1} max={99} why="The hot plays work." onChange={(v) => set((b) => { b.entry.priceBandC = [v, b.entry.priceBandC[1]] })} />
               <NumberField label="Price band high" tip={tip('Price band')} suffix="cents" value={edit.entry.priceBandC[1]} measured={M.entry.priceBandC[1]} min={1} max={99} onChange={(v) => set((b) => { b.entry.priceBandC = [b.entry.priceBandC[0], v] })} />
+              {edit.market.phase !== 'live' && (
+                <Field label="Pregame plays wait until" tip="A pregame play is entered only in the last minutes before the game starts, so the pick and the price have settled. A combos only bot is not held to it, so an early game's leg can go early. Empty enters any time before the start." hint={edit.entry.pregameWindowMin === null
+                  ? 'Any time before the start.'
+                  : `The last ${edit.entry.pregameWindowMin} minutes before the start.${edit.combo.only && edit.market.lanes.includes('COMBO') ? ' Not used: this bot trades combos only.' : ''}`}>
+                  <input type="number" min={1} max={1440} step={5} placeholder="any time" value={edit.entry.pregameWindowMin ?? ''} style={{ width: 120 }}
+                    onChange={(e) => set((b) => { const v = e.target.value === '' ? null : Math.round(Number(e.target.value)); b.entry.pregameWindowMin = v === null || !Number.isFinite(v) ? null : Math.min(1440, Math.max(1, v)) })} />
+                </Field>
+              )}
+              <Field label="When the price is above the play's value" tip="Skip leaves an overpriced play alone. Bid places a buy below the ask at the highest price that still clears the minimum edge, and leaves it waiting in case the price comes down. Kalshi's fee on a waiting order is about a quarter of the normal fee, but a waiting order fills most often when the price is falling for a reason, like a player heading to the bench. Kalshi only; paper fills it only if the real ask comes down to it." hint={edit.entry.orderType === 'bid'
+                ? `Bids below the ask and waits up to ${edit.entry.bidRestS} seconds for the price to come down.`
+                : 'Skips it.'}>
+                <select value={edit.entry.orderType} onChange={(e) => set((b) => { b.entry.orderType = e.target.value as 'take' | 'bid' })}>
+                  <option value="take">Skip it</option>
+                  <option value="bid">Bid at our value and wait</option>
+                </select>
+              </Field>
+              {edit.entry.orderType === 'bid' && <NumberField label="Bid waits" suffix="s" step={30} min={30} max={3600} value={edit.entry.bidRestS} measured={M.entry.bidRestS} onChange={(v) => set((b) => { b.entry.bidRestS = Math.round(v) })} />}
               <Field label="Widest book" tip={tip('Widest book')} hint={edit.entry.maxSpreadC === null
                 ? 'Off: buys into a book of any width.'
                 : `Buys only where the ask is at most ${edit.entry.maxSpreadC}c above the bid. Kalshi books only.`}>
@@ -224,7 +392,7 @@ export function Bots() {
                 ? 'Every trade is the maximum per trade, whatever the edge.'
                 : edit.entry.basis === 'pick'
                   ? 'Kelly sizes a trade with no edge at nothing, so this pick bot will skip most of its picks. Choose Flat.'
-                  : 'Sized by the edge, between the minimum and maximum per trade.'}>
+                  : 'Sized by the edge on the honest chance, between the minimum and maximum per trade: a long shot that loses most of the time gets a small stake, a surer play a bigger one.'}>
                 <select value={edit.size.sizing} onChange={(e) => set((b) => { b.size.sizing = e.target.value as BotSettings['size']['sizing'] })}>
                   <option value="kelly">Kelly</option>
                   <option value="flat">Flat</option>
@@ -232,17 +400,27 @@ export function Bots() {
               </Field>
               {edit.size.sizing === 'kelly' && <NumberField label="Kelly multiplier" tip={`${tip('Kelly')} ${tip('Kelly multiplier')}`} step={0.05} min={0} max={1} value={edit.size.kellyMultiplier} measured={M.size.kellyMultiplier} why="Quarter Kelly." onChange={(v) => set((b) => { b.size.kellyMultiplier = v })} />}
               <NumberField label="Bankroll" tip={tip('Bankroll')} suffix="$, 0 = live balance" step={10} value={edit.size.bankrollUsd} measured={M.size.bankrollUsd} why="Kelly rides the real balance, the 2026-07-23 fluid bankroll." onChange={(v) => set((b) => { b.size.bankrollUsd = v })} />
-              <NumberField label="Maximum per trade" tip={tip('Maximum per trade')} suffix="$" step={1} value={edit.size.maxTradeUsd} measured={M.size.maxTradeUsd} why="MLB_MAX_TRADE_USD." onChange={(v) => set((b) => { b.size.maxTradeUsd = v })} />
               {edit.size.sizing === 'kelly' && <NumberField label="Minimum per trade" tip={tip('Minimum per trade')} suffix="$" step={0.5} value={edit.size.minTradeUsd} measured={M.size.minTradeUsd} why="Below this a trade cannot pay its own fee." onChange={(v) => set((b) => { b.size.minTradeUsd = v })} />}
               <NumberField label="Maximum contracts per trade" tip={tip('Maximum contracts per trade')} value={edit.size.maxContracts} measured={M.size.maxContracts} onChange={(v) => set((b) => { b.size.maxContracts = v })} />
               <NumberField label="Maximum share of equity per game" tip={tip('Maximum share of equity per game')} step={0.05} min={0} max={1} value={edit.size.maxGameEquityPct} measured={M.size.maxGameEquityPct} why="The 255 contract single game positions." onChange={(v) => set((b) => { b.size.maxGameEquityPct = v })} />
             </div>
+            {(() => {
+              const note = flatRiskNote(edit, botRisk(tickets.filter((t) => t.botId === edit.id)))
+              return note && (
+                <div className="note warn small" style={{ marginTop: 10 }}>
+                  {note}
+                  <div className="row" style={{ marginTop: 8 }}>
+                    <button className="btn ghost" onClick={() => set((b) => { b.size.sizing = 'kelly' })}>Size by Kelly on the honest chance</button>
+                    <span className="muted">Keeps the ${edit.size.maxTradeUsd} largest trade. Nothing changes until you save.</span>
+                  </div>
+                </div>
+              )
+            })()}
 
             <div className="section">Guards</div>
             <div className="grid cols-2">
               <NumberField label="No entry in the final" tip={tip('No entry in the final')} suffix="s" value={edit.guards.noEntryFinalS} measured={M.guards.noEntryFinalS} why="The overtime wipeout." onChange={(v) => set((b) => { b.guards.noEntryFinalS = v })} />
               <NumberField label="Cancel unfilled after" tip={tip('Cancel unfilled after')} suffix="s" value={edit.guards.autoCancelS} measured={M.guards.autoCancelS} min={5} onChange={(v) => set((b) => { b.guards.autoCancelS = v })} />
-              <NumberField label="Daily drawdown stop" tip={tip('Daily drawdown stop')} suffix="$" step={5} value={edit.guards.maxDailyDrawdownUsd} measured={M.guards.maxDailyDrawdownUsd} why="Settled losses after fees since 4 AM. Deposits, withdrawals and open trades do not count." onChange={(v) => set((b) => { b.guards.maxDailyDrawdownUsd = v })} />
               <NumberField label="Maximum trades per day" tip={tip('Maximum trades per day')} value={edit.guards.maxTradesPerDay} measured={M.guards.maxTradesPerDay} min={1} onChange={(v) => set((b) => { b.guards.maxTradesPerDay = v })} />
             </div>
             <div className="row wrap" style={{ marginTop: 10, gap: 24 }}>
@@ -282,9 +460,18 @@ export function Bots() {
               </p>
             )}
             {account && <Limits bot={edit} account={account} />}
+            </details>
 
+            {dirty && problems.length > 0 && (
+              <div className="conflict" style={{ marginTop: 18 }}>
+                <span className="mark">!</span>
+                <span><b>Not saved yet. {problems.length === 1 ? 'One setting needs' : `${problems.length} settings need`} fixing first.</b> The bot keeps running on its last saved settings until then.
+                  <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>{problems.map((p) => <li key={p}>{p}</li>)}</ul>
+                </span>
+              </div>
+            )}
             <div className="row" style={{ marginTop: 18 }}>
-              <button className="btn primary" disabled={!dirty} onClick={() => save()}>Save settings</button>
+              <button className="btn primary" disabled={!dirty || problems.length > 0} onClick={() => save()}>Save settings</button>
               {dirty && <button className="btn ghost" onClick={() => load(edit.id)}>Discard changes</button>}
               <button className="btn" disabled={dirty} title={dirty ? 'Save first, so the code matches what is saved' : undefined} onClick={() => setSharing(!sharing)}>Share</button>
               <span className="grow" style={{ flex: 1 }} />
@@ -312,19 +499,6 @@ function Limits({ bot, account }: { bot: BotSettings; account: AccountSettings }
   )
 }
 
-const show = (v: unknown): string => (v === undefined ? '—' : JSON.stringify(v))
-
-function ChangeTable({ changes }: { changes: Change[] }) {
-  if (!changes.length) return <p className="small muted">Every setting is at its measured default.</p>
-  return (
-    <div style={{ overflowX: 'auto' }}>
-      <table className="small">
-        <thead><tr><th>Setting</th><th>Measured default</th><th>This bot</th></tr></thead>
-        <tbody>{changes.map((c) => <tr key={c.field}><td className="mono">{c.field}</td><td>{show(c.from)}</td><td className="warn">{show(c.to)}</td></tr>)}</tbody>
-      </table>
-    </div>
-  )
-}
 
 // The bot list, grouped by sport so a long list stays readable: a bot on one
 // sport sits under it, a bot on several under Several sports. Within a group,
@@ -340,8 +514,8 @@ const FOLD_KEY = 'bots.folded'
 const groupOf = (b: BotSettings): string => (b.market.sports.length === 1 ? b.market.sports[0]! : 'Several sports')
 const rank = (b: BotSettings): number => (b.mode === 'live' ? 0 : b.enabled ? 1 : 2)
 
-function BotList({ bots, selected, onSelect, onToggle, onCreate }: {
-  bots: BotSettings[]; selected: string | null
+function BotList({ bots, problem, selected, onSelect, onToggle, onCreate }: {
+  bots: BotSettings[]; problem: (b: BotSettings) => string | null; selected: string | null
   onSelect: (b: BotSettings) => void; onToggle: (b: BotSettings, on: boolean) => void; onCreate: () => Promise<void>
 }) {
   const [query, setQuery] = useState('')
@@ -407,7 +581,11 @@ function BotList({ bots, selected, onSelect, onToggle, onCreate }: {
                   {g === 'Several sports' ? ` · ${b.market.sports.join(', ')}` : ''}
                 </div>
                 <div className="bot-tags">
-                  <span className={`pill ${b.mode === 'live' ? 'live' : ''}`}>{b.mode}</span>
+                  {/* A live bot that cannot send says so, never a plain LIVE. */}
+                  {problem(b)
+                    ? <span className="pill warn has-tip" data-tip={problem(b)!}>live, not trading</span>
+                    : <span className={`pill ${b.mode === 'live' ? 'live' : ''}`}>{b.mode}</span>}
+                  {b.trial && <span className="pill hot has-tip" data-tip={`A paper trial: ${b.trial.what}. Accept or drop it on the Desk.`}>trial</span>}
                   {b.entry.basis === 'pick' && <span className="pill lane">our pick</span>}
                   {b.size.sizing === 'flat' && <span className="pill lane">flat ${b.size.maxTradeUsd}</span>}
                   {(b.exit.mode === 'limit' || b.exit.mode === 'mark') && <span className="pill lane">exit +{b.exit.targetC}c</span>}
@@ -528,62 +706,186 @@ function Share({ bot }: { bot: BotSettings }) {
   )
 }
 
-function Describe({ onUse }: { onUse: (d: StrategyResult) => void }) {
+const PROVIDER_NAME: Record<ProviderId, string> = { anthropic: 'Claude', openai: 'OpenAI', xai: 'Grok', ollama: 'Ollama' }
+
+// What changed, in plain words: the setting, what it was, what it becomes.
+function ChangeTable({ changes, before = 'Measured default', after = 'This bot' }: { changes: Change[]; before?: string; after?: string }) {
+  if (!changes.length) return <p className="small muted">{before === 'Measured default' ? 'Every setting is at its measured default.' : 'Nothing changes.'}</p>
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="small">
+        <thead><tr><th>Setting</th><th>{before}</th><th>{after}</th></tr></thead>
+        <tbody>{changeLines(changes).map((c) => <tr key={c.field}><td>{c.name}</td><td>{c.from}</td><td className="warn">{c.to}</td></tr>)}</tbody>
+      </table>
+    </div>
+  )
+}
+
+// Type what you want and the AI sets the bot (2026-11-20). It edits the
+// bot that is open, keeps its money settings and whether it runs, and shows
+// every change before anything is saved.
+function AskAi({ bot, onSaved }: { bot: BotSettings; onSaved: (id: string, msg: string) => Promise<void> }) {
   const [sentence, setSentence] = useState('')
-  const [provider, setProvider] = useState<ProviderId>('anthropic')
-  const [configured, setConfigured] = useState<Record<string, boolean>>({})
-  const [busy, setBusy] = useState(false)
-  const [draft, setDraft] = useState<StrategyResult | null>(null)
+  const [provider, setProvider] = useState<ProviderId | null>(null)
+  const [busy, setBusy] = useState<'edit' | 'new' | null>(null)
+  const [draft, setDraft] = useState<(StrategyResult & { isNew: boolean }) | null>(null)
   const [err, setErr] = useState('')
-  useEffect(() => {
-    void api.aiConfigured().then((c) => {
-      setConfigured(c)
-      const first = ProviderId.options.find((p) => c[p])
-      if (first) setProvider(first)
-    })
-  }, [])
-  const any = useMemo(() => Object.values(configured).some(Boolean), [configured])
+  useEffect(() => { void api.aiConfigured().then((c) => setProvider(ProviderId.options.find((p) => c[p]) ?? null)) }, [])
+  const [why, setWhy] = useState<WhyAnswer | null>(null)
+  const [whyBusy, setWhyBusy] = useState(false)
+  // A new bot starts with an empty box, so a request typed for one bot is
+  // never sent for another (2026-11-21).
+  useEffect(() => { setDraft(null); setErr(''); setWhy(null); setSentence(''); setUndo(null); setAnswer(null) }, [bot.id])
+  const explain = async (): Promise<void> => {
+    setWhyBusy(true); setErr('')
+    try { setWhy(await api.aiWhy(bot.id)) } catch (e) { setErr((e as Error).message) } finally { setWhyBusy(false) }
+  }
+
+  // A question is not a settings change (2026-11-21: "it should hit
+  // the API and get that data"). When the draft would change nothing, the same
+  // words go to Ask Lazy Edge, which looks things up with its tools, and its
+  // answer shows here in place of a refusal.
+  const [answer, setAnswer] = useState<ChatReply | null>(null)
+  const ask = async (isNew: boolean): Promise<void> => {
+    if (!provider) return
+    setBusy(isNew ? 'new' : 'edit'); setErr(''); setDraft(null); setAnswer(null)
+    try {
+      const d = await api.draft(sentence, provider, isNew ? undefined : bot)
+      if (!isNew && d.changes.length === 0) setAnswer(await api.deskChat(`About my bot "${bot.name}": ${sentence}`, []))
+      else setDraft({ ...d, isNew })
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(null) }
+  }
+  const question = async (): Promise<void> => {
+    setBusy('edit'); setErr(''); setDraft(null); setAnswer(null)
+    try { setAnswer(await api.deskChat(`About my bot "${bot.name}": ${sentence}`, [])) } catch (e) { setErr((e as Error).message) } finally { setBusy(null) }
+  }
+  const [undo, setUndo] = useState<{ id: string; botId: string } | null>(null)
+  // Through the confirmation levels: a live bot asked to trade more gets a
+  // second window by name. Every change can be put back.
+  const save = async (): Promise<void> => {
+    if (!draft) return
+    try {
+      const out = await api.aiSave(draft.bot, sentence)
+      setDraft(null); setSentence('')
+      setUndo(out.changeId ? { id: out.changeId, botId: out.bot.id } : null)
+      await onSaved(out.bot.id, draft.isNew ? `Saved "${out.bot.name}" as a new bot, in paper.` : `Saved. ${out.bot.name} runs on the new settings from its next cycle.`)
+    } catch (e) { if ((e as Error).message !== 'Cancelled.') setErr((e as Error).message) }
+  }
+  const trial = async (): Promise<void> => {
+    if (!draft) return
+    try {
+      const t = await api.trialStart(draft.bot, sentence)
+      setDraft(null); setSentence('')
+      await onSaved(bot.id, `Started "${t.name}", a paper copy running the change beside this bot. Compare them on the Desk, then accept or drop it.`)
+    } catch (e) { setErr((e as Error).message) }
+  }
+  const putBack = async (): Promise<void> => {
+    if (!undo) return
+    try { await api.aiUndo(undo.id); setUndo(null); await onSaved(undo.botId, 'Put the settings back as they were before the AI change.') } catch (e) { if ((e as Error).message !== 'Cancelled.') setErr((e as Error).message) }
+  }
 
   return (
-    <details>
-      <summary>Describe a strategy in plain English and let your AI draft the settings</summary>
-      {!any ? (
-        <p className="small muted">Add an AI key on the Keys screen first.</p>
+    <div className="note" style={{ marginBottom: 12 }}>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <b>Tell the AI what you want</b>
+        <button className="btn ghost" disabled={whyBusy} onClick={() => void explain()}>{whyBusy ? 'Checking…' : bot.enabled ? 'Why is it not trading?' : 'What would it do?'}</button>
+      </div>
+      {why && (
+        <div className="note warn small" style={{ margin: '8px 0' }}>
+          <b>{why.by === 'ai' ? why.text : why.headline}</b>
+          {why.lines.length > 0 && <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>{why.lines.map((l) => <li key={l}>{l}</li>)}</ul>}
+        </div>
+      )}
+      {!provider ? (
+        <p className="small muted" style={{ marginBottom: 0 }}>Add an AI key on the Keys screen and you can set any bot by typing what you want.</p>
       ) : (
-        <div className="grid" style={{ marginTop: 10 }}>
+        <div className="grid" style={{ marginTop: 8 }}>
           <textarea
-            placeholder="Only NFL totals, the under side when our probability is at least 6 points above the market's, never in the final two minutes, $5 a trade at most."
+            placeholder="For example: only props in the 2nd, 3rd and 4th quarters that are 60% or more to hit, priced at least 3 points under our number."
             value={sentence}
             onChange={(e) => setSentence(e.target.value)}
           />
           <div className="row">
-            <select value={provider} onChange={(e) => setProvider(e.target.value as ProviderId)} style={{ width: 160 }}>
-              {ProviderId.options.filter((p) => configured[p]).map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-            <button className="btn primary" disabled={busy || sentence.trim().length < 10} onClick={async () => {
-              setBusy(true); setErr(''); setDraft(null)
-              try { setDraft(await api.draft(sentence, provider)) } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
-            }}>{busy ? 'Drafting…' : 'Draft settings'}</button>
+            <button className="btn primary" disabled={busy !== null || sentence.trim().length < 6} onClick={() => void ask(false)}>{busy === 'edit' ? 'Working…' : `Change ${bot.name}`}</button>
+            <button className="btn ghost" disabled={busy !== null || sentence.trim().length < 6} onClick={() => void ask(true)}>{busy === 'new' ? 'Working…' : 'Make a new bot'}</button>
+            <button className="btn ghost" disabled={busy !== null || sentence.trim().length < 6} onClick={() => void question()} title="Looks up what the question needs from the Lazy Edge API and your own record, and answers. Changes nothing.">Ask a question</button>
           </div>
-          {err && <p className="err">{err}</p>}
-          {draft && (
-            <div className="note">
-              <p style={{ marginTop: 0 }}>{draft.explanation}</p>
-              {draft.changes.length > 0 && (
-                <table className="small">
-                  <thead><tr><th>Setting</th><th>Measured default</th><th>Draft</th></tr></thead>
-                  <tbody>{draft.changes.map((c) => <tr key={c.field}><td className="mono">{c.field}</td><td>{JSON.stringify(c.from)}</td><td className="warn">{JSON.stringify(c.to)}</td></tr>)}</tbody>
-                </table>
-              )}
-              {draft.unsupported.length > 0 && <p className="warn small">Not expressible in settings, left at defaults: {draft.unsupported.join('; ')}</p>}
-              <div className="row" style={{ marginTop: 8 }}>
-                <button className="btn primary" onClick={() => { onUse(draft); setDraft(null) }}>Load into the editor</button>
-                <span className="small muted">Nothing is saved or switched on until you save it yourself.</span>
-              </div>
+          <span className="small muted">{PROVIDER_NAME[provider]} sets everything but money: trade size, the loss stop and paper or live stay yours. A question is answered from the Lazy Edge data and your record.</span>
+          {err && <p className="err" style={{ whiteSpace: 'pre-line' }}>{err}</p>}
+          {answer && (
+            <div className="note" style={{ whiteSpace: 'pre-wrap' }}>
+              {answer.answer}
+              {answer.proposals.map((p) => <div key={p.id} style={{ marginTop: 8 }}><Proposal p={p} /></div>)}
             </div>
+          )}
+          {draft && (
+            <div>
+              <p style={{ marginTop: 0 }}>{draft.explanation}</p>
+              {draft.recommendation && <div className="note small" style={{ margin: '0 0 8px', whiteSpace: 'pre-wrap' }}><b>The AI recommends.</b> {draft.recommendation}</div>}
+              <ChangeTable changes={draft.changes} before={draft.isNew ? 'Measured default' : 'Now'} after={draft.isNew ? 'New bot' : 'After'} />
+              {draft.unsupported.length > 0 && <p className="warn small">Not done: {draft.unsupported.join('; ')}</p>}
+              <div className="row" style={{ marginTop: 8 }}>
+                <button className="btn primary" onClick={() => void save()}>{draft.isNew ? 'Save as a new bot' : 'Save these changes'}</button>
+                {!draft.isNew && <button className="btn ghost" title="Runs the change on a paper copy beside this bot, so you can compare before it touches this one." onClick={() => void trial()}>Try it in paper first</button>}
+                <button className="btn ghost" onClick={() => setDraft(null)}>Discard</button>
+              </div>
+              {!draft.isNew && bot.mode === 'live' && <p className="small muted" style={{ marginBottom: 0 }}>This bot is live. A change that lets it trade more asks you once more before it is saved.</p>}
+            </div>
+          )}
+          {undo && undo.botId === bot.id && !draft && (
+            <div className="row"><span className="small">Saved from the AI.</span><button className="btn ghost" onClick={() => void putBack()}>Put it back</button></div>
           )}
         </div>
       )}
-    </details>
+    </div>
+  )
+}
+
+// A starter bot's update: what this version's starter settings changed on it
+// and the way back, a live bot's waiting choice, or a reset to the starter.
+function StarterNote({ bot, status, onDone }: { bot: BotSettings; status: StarterStatus | undefined; onDone: (msg: string) => Promise<void> }) {
+  const s = starterOf(bot.id)!
+  const [open, setOpen] = useState(false)
+  const [err, setErr] = useState('')
+  const act = async (fn: () => Promise<void>, msg: string): Promise<void> => {
+    setErr('')
+    try { await fn(); await onDone(msg) } catch (e) { setErr((e as Error).message) }
+  }
+  return (
+    <div className="note" style={{ marginBottom: 12 }}>
+      <b>Starter bot.</b> {s.summary}
+      {status?.pending && (
+        <div className="note warn" style={{ marginTop: 10 }}>
+          <b>This update changed these settings on the starter.</b> Only these; everything else you set stays, and money never changes. The bot is live, so nothing changed until you choose.
+          <ChangeTable changes={status.pending} before="Yours" after="New starter" />
+          <div className="row" style={{ marginTop: 8 }}>
+            <button className="btn primary" onClick={() => void act(() => api.starterUse(bot.id), 'Took the new starter settings. Your old ones can be put back.')}>Use the new settings</button>
+            <button className="btn ghost" onClick={() => void act(() => api.starterKeep(bot.id), 'Kept your settings.')}>Keep mine</button>
+          </div>
+        </div>
+      )}
+      {status?.replaced && (
+        <div style={{ marginTop: 10 }}>
+          <span className="small">This bot took this version's starter settings{status.replaced.length ? `, ${status.replaced.length} ${status.replaced.length === 1 ? 'change' : 'changes'}` : ''}. </span>
+          <span className="small" style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setOpen(!open)}>{open ? 'Hide' : 'See what changed'}</span>
+          {open && <ChangeTable changes={status.replaced} before="Yours before" after="Now" />}
+          <div className="row" style={{ marginTop: 8 }}>
+            <button className="btn ghost" onClick={() => void act(() => api.starterUndo(bot.id), 'Put your old settings back.')}>Put my settings back</button>
+            <button className="btn ghost" onClick={() => void act(() => api.starterDismiss(bot.id), 'Keeping the starter settings.')}>Keep the new ones</button>
+          </div>
+        </div>
+      )}
+      {!status?.pending && !status?.replaced && status?.reset && (
+        <div style={{ marginTop: 10 }}>
+          <span className="small">You have changed {status.reset.length} {status.reset.length === 1 ? 'setting' : 'settings'} from the starter. </span>
+          <span className="small" style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setOpen(!open)}>{open ? 'Hide' : 'See them'}</span>
+          {open && <ChangeTable changes={status.reset} before="Yours" after="Starter" />}
+          <div className="row" style={{ marginTop: 8 }}>
+            <button className="btn ghost" onClick={() => void act(() => api.starterReset(bot.id), 'Reset to the starter settings, your money settings kept. Your old ones can be put back.')}>Reset to the starter</button>
+          </div>
+        </div>
+      )}
+      {err && <p className="err small">{err}</p>}
+    </div>
   )
 }

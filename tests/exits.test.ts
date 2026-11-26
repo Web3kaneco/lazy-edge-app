@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addExitFill, bidFromOtherAsk, exitFee, exitTargetC, newExit, paperExitFill, positionPnl, withOrderTotals } from '../src/shared/exits'
+import { addExitFill, bidFromOtherAsk, countFp, exitFee, exitTargetC, newExit, nothingHeld, paperExitFill, positionPnl, withOrderTotals } from '../src/shared/exits'
 import { opposes } from '../src/main/rules/stance'
 
 describe('exits, 2026-11-16', () => {
@@ -35,6 +35,20 @@ describe('exits, 2026-11-16', () => {
     expect(positionPnl({ ...base, exit: half }, null)).toBeNull()
     expect(positionPnl({ ...base, exit: half }, 'no')).toBeCloseTo(4 * 0.12 - 6 * 0.55 - 0.18 - 0.07, 2)
     expect(positionPnl({ ...base, exit: null }, 'yes')).toBeCloseTo(10 * 0.45 - 0.18, 2)
+  })
+
+  // 23 November 2026: Kalshi filled 0.5 of a contract and the ticket settled
+  // with no result, so it was missing from P&L and the loss stops.
+  it('grades a fill under one contract', () => {
+    const half = { filledContracts: 0.5, avgFillC: 55, feeUsd: 0, side: 'no' as const, exit: null }
+    expect(positionPnl(half, 'yes')).toBeCloseTo(-0.28, 2)
+    expect(positionPnl({ ...half, filledContracts: 0.1, avgFillC: 86, feeUsd: 0.0009 }, 'no')).toBeCloseTo(0.01, 2)
+    expect(positionPnl({ ...half, filledContracts: 0 }, 'no')).toBeNull()
+    expect(nothingHeld(0.5)).toBe(false)
+    expect(nothingHeld(0.3 - 0.1 - 0.2)).toBe(true)
+    expect(countFp(9)).toBe('9.00')
+    expect(countFp(0.5)).toBe('0.50')
+    expect(countFp(0.12)).toBe('0.12')
   })
 
   it('keeps what sold before a resting order replaced the last one', () => {

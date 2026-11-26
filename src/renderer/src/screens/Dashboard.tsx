@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { tradingDay } from '@shared/day'
 import { heldNote } from '@shared/limits'
 import type { AccountSettings, BotSettings } from '@shared/schema'
+import { liveProblem } from '@shared/venues'
 import { ago, api, usd, type EngineState, type Ticket } from '../api'
 import { Tip } from '../ui'
 
@@ -29,6 +30,10 @@ export function Dashboard({ engine, onSendDay }: { engine: EngineState | null; o
     <>
       <h1>Dashboard</h1>
       <p className="lede">What every bot did and why. A skip names the gate that stopped it, so a quiet night always has a reason you can read.</p>
+      {account && engine && bots.map((b) => {
+        const why = liveProblem(b, account, engine.venues)
+        return why ? <div key={b.id} className="note bad" style={{ marginBottom: 10 }}><strong>{b.name} is live but cannot trade.</strong> {why}</div> : null
+      })}
 
       <div className="grid cols-4">
         {(['paper', 'kalshi', 'polymarket'] as const).map((v) => {
@@ -99,7 +104,6 @@ function InPlay({ limits: l, account, bots }: { limits: EngineState['limits']; a
           <div className={`meter ${share >= 0.9 ? 'full' : ''}`}><div style={{ width: `${share * 100}%` }} /></div>
           <div className="stat-label">
             {usd(l.openLiveUsd)} of {usd(l.capUsd)} open across live bots · {usd(Math.max(l.capUsd - l.openLiveUsd, 0))} free
-            {l.dryRun ? ' · dry run is on, so no new real trades open' : ''}
           </div>
         </>
       ) : (

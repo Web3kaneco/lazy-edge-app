@@ -62,7 +62,14 @@ export class PaperVenue implements Venue {
   async place(order: TradeDecision): Promise<PlaceResult> {
     const book = await this.readBook(order.priceSource, order.contract, order.side).catch(() => null)
     const res = paperFill(order, book)
-    return res.filledContracts > 0 ? { ...res, venueOrderId: `paper-${order.idempotencyKey}` } : res
+    if (res.filledContracts > 0) return { ...res, venueOrderId: `paper-${order.idempotencyKey}` }
+    // A bid below the ask (2026-11-21) waits for the price to come down; the
+    // supervisor checks the live book each cycle and fills it only if the ask
+    // reaches it, or cancels it when its wait is over.
+    if (order.rest && book && book.ask !== null) {
+      return { ok: true, venueOrderId: `paper-rest-${order.idempotencyKey}`, status: 'resting', filledContracts: 0, avgFillC: null, feeUsd: 0, error: null, evidence: res.evidence }
+    }
+    return res
   }
 
   async status(): Promise<OrderUpdate | null> {

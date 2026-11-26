@@ -47,7 +47,7 @@ async function run(kalshi: KalshiVenue, tickets: Ticket[]): Promise<void> {
   const since = now - LOOKBACK_DAYS * 86_400_000
   let changed = false
   for (const t of tickets) {
-    if (t.createdAt < since || t.filledContracts < 1 || t.avgFillC === null) continue
+    if (t.createdAt < since || !(t.filledContracts > 0) || t.avgFillC === null) continue
     if ((t.venue === 'paper' ? t.priceSource : t.venue) !== 'kalshi') continue
     const e: Entry = all[t.id] ?? {}
     try {

@@ -16,6 +16,15 @@ export function BrandMark() {
   )
 }
 
+// The segmented control at the top of a screen: one of a few views.
+export function Segments<T extends string>({ options, value, onChange }: { options: readonly T[]; value: T; onChange: (v: T) => void }) {
+  return (
+    <div className="segments" role="tablist">
+      {options.map((o) => <button key={o} role="tab" aria-selected={o === value} className={o === value ? 'on' : ''} onClick={() => onChange(o)}>{o}</button>)}
+    </div>
+  )
+}
+
 export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label?: ReactNode }) {
   return (
     <span className={`toggle ${on ? 'on' : ''}`} onClick={() => onChange(!on)} role="switch" aria-checked={on}>
@@ -25,19 +34,26 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boo
   )
 }
 
-export function Chips<T extends string>({ options, value, onChange, tips }: { options: readonly T[]; value: T[]; onChange: (v: T[]) => void; tips?: (o: T) => string }) {
+// A chip `locked` returns text for is greyed out and cannot be clicked; the
+// text says why, on hover.
+export function Chips<T extends string>({ options, value, onChange, tips, names, locked }: { options: readonly T[]; value: T[]; onChange: (v: T[]) => void; tips?: (o: T) => string; names?: (o: T) => string; locked?: (o: T) => string | null }) {
   return (
     <div className="chips">
-      {options.map((o) => (
-        <span
-          key={o}
-          className={`chip ${value.includes(o) ? 'on' : ''}${tips?.(o) ? ' has-tip' : ''}`}
-          data-tip={tips?.(o) || undefined}
-          onClick={() => onChange(value.includes(o) ? value.filter((x) => x !== o) : [...value, o])}
-        >
-          {o}
-        </span>
-      ))}
+      {options.map((o) => {
+        const why = locked?.(o) ?? null
+        const text = why ?? tips?.(o) ?? ''
+        return (
+          <span
+            key={o}
+            className={`chip ${value.includes(o) ? 'on' : ''}${why ? ' locked' : ''}${text ? ' has-tip' : ''}`}
+            data-tip={text || undefined}
+            aria-disabled={why ? true : undefined}
+            onClick={() => { if (!why) onChange(value.includes(o) ? value.filter((x) => x !== o) : [...value, o]) }}
+          >
+            {names ? names(o) : o}
+          </span>
+        )
+      })}
     </div>
   )
 }
@@ -78,7 +94,7 @@ export function NumberField(props: {
   )
 }
 
-export function Field({ label, children, hint, tip }: { label: string; children: ReactNode; hint?: string; tip?: string }) {
+export function Field({ label, children, hint, tip }: { label: string; children: ReactNode; hint?: ReactNode; tip?: string }) {
   return (
     <div className="field">
       <label>{label}{tip && <Tip text={tip} />}</label>

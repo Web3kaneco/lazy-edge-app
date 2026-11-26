@@ -68,5 +68,14 @@ describe('limits summary wording', () => {
     const paper = limitsSummary(explorer((b) => { b.mode = 'paper'; b.pollS = 60 }), DEFAULT_ACCOUNT).lines.join(' ')
     expect(paper).not.toMatch(/live bots together/)
     expect(paper).toMatch(/every 60 seconds/)
+    // A paper test runs the whole night (2026-11-20).
+    expect(paper).toMatch(/no daily trade limit and no loss stop/)
+    expect(paper).not.toMatch(/At most \d+ new trades/)
+  })
+
+  it('a flat bot says every trade is the same, not Kelly', () => {
+    const flat = limitsSummary(explorer((b) => { b.size.sizing = 'flat'; b.size.maxTradeUsd = 5 }), DEFAULT_ACCOUNT).lines.join(' ')
+    expect(flat).toMatch(/Every trade is \$5, the same each time/)
+    expect(flat).not.toMatch(/Kelly/)
   })
 })

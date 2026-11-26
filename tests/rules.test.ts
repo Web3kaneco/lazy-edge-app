@@ -29,6 +29,7 @@ function signal(over: Partial<Signal> = {}): Signal {
     quotes: [{ venue: 'kalshi', contract: 'KXNFLTOTAL-G1-47', side: 'no', ask: 0.5, askSize: 500, priceAgeS: 20 }],
     why: null,
     receivedAt: NOW,
+    startsAt: NOW + 10 * 60_000,
     ...over
   }
 }
@@ -47,8 +48,6 @@ function liveBot(over: (b: BotSettings) => void = () => {}): BotSettings {
 
 function account(over: (a: AccountSettings) => void = () => {}): AccountSettings {
   const a: AccountSettings = structuredClone(DEFAULT_ACCOUNT)
-  a.venues.kalshi.enabled = true
-  a.venues.polymarket.enabled = true
   over(a)
   return a
 }
@@ -56,6 +55,7 @@ function account(over: (a: AccountSettings) => void = () => {}): AccountSettings
 function ctx(over: Partial<GateContext> = {}): GateContext {
   return {
     now: NOW,
+    keyed: ['kalshi', 'polymarket'],
     venues: {
       paper: { balanceUsd: 1000, equityUsd: 1000 },
       kalshi: { balanceUsd: 200, equityUsd: 200 },
@@ -116,7 +116,6 @@ describe('gates', () => {
     if (d.kind !== 'trade') return
     expect(d.side).toBe('no')
     expect(d.venue).toBe('kalshi')
-    expect(d.dryRun).toBe(true) // the shipped default
   })
 
   it('an unrecognised signal never reaches an order', () => {
@@ -226,18 +225,48 @@ describe('settings audit, 2026-11-10', () => {
     expect(d.kind === 'skip' && d.detail).toMatch(/polymarket:edge 2.0pp/)
   })
 
-  it('a live bot with only paper in its venues trades nowhere real', () => {
-    const d = evaluate(signal(), liveBot((b) => { b.market.venues = ['paper'] }), account((a) => { a.executionMode = 'live' }), ctx())
-    expect(d.kind === 'skip' && d.gate).toBe('no_venue')
+})
+
+// 2026-11-20: two live bots sent nothing all night because their venues
+// still said paper. A bot's mode is the one live switch; venues follow keys.
+describe('the mode is the live switch, venues follow the keys', () => {
+  it('a live bot left on paper in its venues trades on the venue with a key', () => {
+    const d = evaluate(signal(), liveBot((b) => { b.market.venues = ['paper'] }), account(), ctx({ keyed: ['kalshi'] }))
+    expect(d).toMatchObject({ kind: 'trade', venue: 'kalshi' })
+  })
+
+  it('a venue without a key is never used, whatever the bot names', () => {
+    const s = signal({ quotes: [
+      { venue: 'kalshi', contract: 'K', side: 'no', ask: 0.5, askSize: 100, priceAgeS: 10 },
+      { venue: 'polymarket', contract: 'P', side: 'no', ask: 0.46, askSize: 100, priceAgeS: 10 }
+    ] })
+    const d = evaluate(s, liveBot((b) => { b.market.venues = ['polymarket'] }), account(), ctx({ keyed: ['kalshi'] }))
+    expect(d).toMatchObject({ kind: 'trade', venue: 'kalshi' })
+  })
+
+  it('a live bot with no key saved has nowhere to send and says so', () => {
+    const d = evaluate(signal(), liveBot(), account(), ctx({ keyed: [] }))
+    expect(d).toMatchObject({ kind: 'skip', gate: 'no_venue' })
+    expect(d.kind === 'skip' && d.detail).toMatch(/Keys screen/)
+  })
+
+  it('a paper bot with no key still prices off the public book', () => {
+    expect(evaluate(signal(), bot(), account(), ctx({ keyed: [] }))).toMatchObject({ kind: 'trade', venue: 'paper' })
   })
 })
 
-describe('loss stops, 2026-11-10', () => {
+describe('loss and pace stops hold live money only', () => {
   it('the account stop pauses live bots and leaves paper bots alone', () => {
     const down = ctx({ accountDailyPnlUsd: -60 })
-    const live = evaluate(signal(), liveBot(), account((a) => { a.executionMode = 'live' }), down)
+    const live = evaluate(signal(), liveBot(), account(), down)
     expect(live.kind === 'skip' && live.gate).toBe('account_drawdown')
     expect(evaluate(signal(), bot(), account(), down).kind).toBe('trade')
+  })
+
+  it('a paper test never stops at the daily trade count or its loss stop', () => {
+    const busy = ctx({ botTradesToday: 40, botDailyPnlUsd: -80 })
+    expect(evaluate(signal(), bot(), account(), busy).kind).toBe('trade')
+    expect(evaluate(signal(), liveBot(), account(), ctx({ botTradesToday: 40 }))).toMatchObject({ gate: 'max_trades_today' })
   })
 })
 
@@ -334,5 +363,20 @@ describe('quarters and the chance to hit, 2026-11-16', () => {
     const first = evaluate(signal(), b, account(), ctx())
     const again = evaluate(signal(), b, account(), ctx({ entriesToday: 1 }))
     expect(first.kind === 'trade' && again.kind === 'trade' && first.idempotencyKey !== again.idempotencyKey).toBe(true)
+  })
+
+  it('a retry after an order Kalshi cancelled unfilled gets a new id; a lost answer keeps its own', () => {
+    const b = bot()
+    const key = (c: Partial<GateContext>): string | null => { const d = evaluate(signal(), b, account(), ctx(c)); return d.kind === 'trade' ? d.idempotencyKey : null }
+    expect(key({ cancelledToday: 1 })).not.toBe(key({}))
+    expect(key({ cancelledToday: 2 })).not.toBe(key({ cancelledToday: 1 }))
+    expect(key({ cancelledToday: 0 })).toBe(key({}))
+  })
+
+  it('a venue holding new orders after a low balance refusal is passed over, with the reason', () => {
+    const held = ctx({ venues: { kalshi: { balanceUsd: 200, equityUsd: 200, hold: 'Kalshi refused an order for low balance at 1:37 PM; new orders wait 4 more min' } } })
+    const d = evaluate(signal(), liveBot((x) => { x.market.venues = ['kalshi'] }), account(), held)
+    expect(d).toMatchObject({ gate: 'no_venue' })
+    expect(d.kind === 'skip' && d.detail).toMatch(/low balance/)
   })
 })

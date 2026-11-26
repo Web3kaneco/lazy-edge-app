@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { applyFix } from '@shared/fixes'
 import { DEFAULT_ACCOUNT, defaultBot } from '@shared/ruleset'
 import { BotSettings } from '@shared/schema'
-import type { Signal } from '@shared/signal'
+import { playTags, type Signal } from '@shared/signal'
 import { STARTERS } from '@shared/starters'
 import { nbaLiveEdges, nbaPicks } from '../src/main/data/normalize'
 import { evaluate, type GateContext } from '../src/main/rules/gates'
@@ -18,7 +18,7 @@ function pick(over: Partial<Signal> = {}): Signal {
     ourP: 0.8, marketP: 0.85, edgePp: -5, label: 'PRICE_GAP', kelly: null, trigger: false, measured: false,
     clock: { period: 3, secondsRemaining: 1000, overtime: false },
     quotes: [{ venue: 'kalshi', contract: 'KXNBAGAME-99JAN01AAABBB-BBB', side: 'yes', ask: 0.85, askSize: 500, priceAgeS: 20 }],
-    why: null, receivedAt: NOW, team: { lead: 6, winP: 0.85 }, pickOnly: true,
+    why: null, receivedAt: NOW, startsAt: NOW + 10 * 60_000, team: { lead: 6, winP: 0.85 }, pickOnly: true,
     ...over
   }
 }
@@ -39,9 +39,9 @@ const pickBot = (over: (b: BotSettings) => void = () => {}): BotSettings => bot(
   b.size.maxTradeUsd = 5
   over(b)
 })
-const account = () => { const a = structuredClone(DEFAULT_ACCOUNT); a.venues.kalshi.enabled = true; return a }
+const account = () => { const a = structuredClone(DEFAULT_ACCOUNT); return a }
 const ctx = (paperUsd = 1000): GateContext => ({
-  now: NOW, venues: { paper: { balanceUsd: paperUsd, equityUsd: paperUsd }, kalshi: { balanceUsd: 200, equityUsd: 200 } }, openMarketKeys: new Set(), gamePositions: [],
+  now: NOW, venues: { paper: { balanceUsd: paperUsd, equityUsd: paperUsd }, kalshi: { balanceUsd: 200, equityUsd: 200 } }, keyed: ['kalshi'], openMarketKeys: new Set(), gamePositions: [],
   gameExposureUsd: 0, accountOpenExposureUsd: 0, botDailyPnlUsd: 0, accountDailyPnlUsd: 0, botTradesToday: 0
 })
 
@@ -134,7 +134,7 @@ describe('our pick from the NBA feed', () => {
     expect(noTicker.signals).toEqual([])
     expect(noTicker.refused[0]!.reason).toContain('no home ticker')
     expect(nbaLiveEdges([{ ...row, trade_signal: 'HOLD', our_prob: 0.5 }], NOW, true).signals).toEqual([])
-    expect(nbaLiveEdges([{ ...row, trade_signal: 'HOLD', signal_age_s: 900 }], NOW, true).signals).toEqual([])
+    expect(nbaLiveEdges([{ ...row, trade_signal: 'HOLD', signal_age_s: 1600 }], NOW, true).signals).toEqual([])
   })
 })
 
@@ -163,13 +163,32 @@ describe('/v1/nba/picks', () => {
     expect(away).toMatchObject({ key: 'nba:g2:MONEYLINE:away', signalType: 'BUY_AWAY' })
   })
 
-  it('reads a live pick with its clock and score, and holds it to 180 seconds', () => {
+  it('reads a live pick with its clock and score, through a break but not a wedged feed', () => {
     const live = { ...row, phase: 'live', period: 3, clock: '5:32', home_score: 80, away_score: 74, corrected_p: null, record_season: null, record_7d: null, computed_at_ms: NOW - 20_000 }
     const s = nbaPicks([live], NOW).signals[0]!
     expect(s).toMatchObject({ phase: 'live', team: { lead: 6 } })
     expect(s.clock).toMatchObject({ period: 3, overtime: false })
     expect(s.why).toBe('the edge points at AAA; API BACK')
-    expect(nbaPicks([{ ...live, computed_at_ms: NOW - 200_000 }], NOW).refused[0]!.reason).toBe('pick 200s old')
+    expect(nbaPicks([{ ...live, computed_at_ms: NOW - 600_000 }], NOW).signals).toHaveLength(1) // halftime
+    expect(nbaPicks([{ ...live, computed_at_ms: NOW - 1_600_000 }], NOW).refused[0]!.reason).toBe('pick 1600s old')
+  })
+
+  // API #981 (live 2026-11-20): the market's view of our pick and, in play,
+  // whether the pick changed at the tip.
+  it('reads the market on our pick, and a pick that changed at the tip', () => {
+    const live = { ...row, phase: 'live', period: 2, clock: '4:00', home_score: 50, away_score: 48, computed_at_ms: NOW - 20_000,
+      model: 'engine', market_pick: 'AAA', market_p: 0.44, pick_is_favorite: false, gap_pp: 12.5, pregame_pick: 'AAA', pick_changed: true }
+    const s = nbaPicks([live], NOW).signals[0]!
+    expect(s).toMatchObject({ phase: 'live', pickChanged: true, team: { winP: 0.44 } })
+    expect(s.why).toMatch(/the market has AAA winning/)
+    expect(s.why).toMatch(/\+12\.5 points over the market/)
+    expect(s.why).toMatch(/changed at the tip from AAA/)
+    expect(playTags(s)).toMatchObject({ pickChanged: true, teamWinP: 0.44 })
+    // Before the tip the row's own phase decides, and nothing is said to change.
+    const pre = nbaPicks([{ ...row, phase: 'pregame', pick_changed: false, market_p: 0.8, pick_is_favorite: true }], NOW).signals[0]!
+    expect(pre).toMatchObject({ phase: 'pregame', team: { winP: 0.8 } })
+    expect(pre.pickChanged).toBeUndefined()
+    expect(pre.why).toMatch(/the market agrees/)
   })
 
   it('refuses a row with no model number, a stale flag, no ticker, no time or a stalled pregame number', () => {
@@ -184,7 +203,8 @@ describe('/v1/nba/picks', () => {
 
   it('is bought by a pick bot by its own rules, whatever the API signal says', () => {
     const s = nbaPicks([{ ...row, signal: 'WATCH', reason: 'the price is over 92c' }], NOW).signals[0]!
-    const quoted = { ...s, quotes: [{ ...s.quotes[0]!, ask: 0.82, askSize: 500, priceAgeS: 20 }] }
+    // The engine adds the tip time; 10 minutes out is inside the pregame window.
+    const quoted = { ...s, startsAt: NOW + 10 * 60_000, quotes: [{ ...s.quotes[0]!, ask: 0.82, askSize: 500, priceAgeS: 20 }] }
     expect(evaluate(quoted, pickBot((b) => { b.market.phase = 'pregame' }), account(), ctx())).toMatchObject({ kind: 'trade', limitPriceC: 82 })
     expect(evaluate(quoted, bot(), account(), ctx())).toMatchObject({ gate: 'pick_only' })
   })
@@ -230,7 +250,7 @@ describe("our chance above the price, and Kaneco's bot, 2026-11-20", () => {
   it("Kaneco's bot carries the rules as set", () => {
     const k = STARTERS.find((s) => s.key === 'kaneco')!.build()
     expect(BotSettings.parse(k)).toBeTruthy()
-    expect(k.name).toBe("Kaneco's bot")
+    expect(k.name).toBe("Kaneco's Bot")
     expect(k).toMatchObject({
       enabled: false, mode: 'paper',
       market: { sports: ['NBA', 'NFL'], lanes: ['MONEYLINE'], phase: 'both' },

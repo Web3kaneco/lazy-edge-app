@@ -17,7 +17,7 @@ export interface PlaceResult {
   ok: boolean
   venueOrderId: string | null
   // cancelled: a paper order the live book could not fill at the limit.
-  status: 'dry_run' | 'resting' | 'filled' | 'partial' | 'rejected' | 'cancelled'
+  status: 'resting' | 'filled' | 'partial' | 'rejected' | 'cancelled'
   filledContracts: number
   avgFillC: number | null
   feeUsd: number
@@ -74,13 +74,3 @@ export interface SellOrder {
   timeInForce: 'gtc' | 'ioc'
   clientOrderId: string
 }
-
-export const DRY_RUN_RESULT = (order: TradeDecision): PlaceResult => ({
-  ok: true,
-  venueOrderId: `dryrun-${order.idempotencyKey}`,
-  status: 'dry_run',
-  filledContracts: 0,
-  avgFillC: null,
-  feeUsd: 0,
-  error: null
-})

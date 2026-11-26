@@ -7,26 +7,33 @@ import { EventEmitter } from 'node:events'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { checkLock, dayPct, rollDay, type LockDay, type LockState } from '@shared/profitlock'
-import { acceptSideFor, bestQuote, eventOf, fillMatches, fillPosition, pickCombo, type ComboLeg, type QuoteReading } from '@shared/combos'
+import { acceptSideFor, apiTicketPicks, bestQuote, comboRfqContracts, fillMatches, fillPosition, pickCombo, type ComboLeg, type ComboPick, type QuoteReading } from '@shared/combos'
 import { createHash } from 'node:crypto'
 import { kalshiFee } from '../rules/fees'
 import { tradingDay } from '@shared/day'
-import { addExitFill, bidFromOtherAsk, exitFee, newExit, paperExitFill, positionPnl, timeExitDue, withOrderTotals, type CashOutResult, type TicketExit } from '@shared/exits'
+import { addExitFill, bidFromOtherAsk, exitFee, newExit, nothingHeld, paperExitFill, positionPnl, timeExitDue, withOrderTotals, type CashOutResult, type TicketExit } from '@shared/exits'
 import { isLimitGate, type HeldBack, type LimitGate } from '@shared/limits'
 import { rulesOf } from '@shared/review'
 import type { AccountSettings, BotSettings, VenueId } from '@shared/schema'
 import { playTags, type BotVerdict, type Signal, type VenueQuote } from '@shared/signal'
+import { REAL_VENUES, type RealVenue } from '@shared/venues'
+import { kalshiGameCode, kalshiRungs, mapLeg, nameKey, NFL_PROP_SERIES, nflSlips, rankSlips, type KalshiRung, type MappedLeg, type Ranked } from '@shared/nflcombos'
+import { calibrate, withHonest, type Calibration } from '@shared/honest'
 import { screen, type Candidate } from '../ai/agent'
 import { accuracy } from './accuracy'
 import { ai } from '../ai/registry'
 import { lazyedge, NotSignedInError, PlanInactiveError } from '../data/lazyedge'
-import { matchupOf, mlbEdges, nflBoardPhase, nbaLiveEdges, nbaPicks, nbaProps, nbaRowProblem, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, type NflMarketMap, type Normalized } from '../data/normalize'
+import { matchupOf, mlbEdges, nflBoardPhase, nflInfoToKalshi, nbaLiveEdges, nbaPicks, nbaProps, nbaRowProblem, nbaSpreadLadder, nflBoardRows, nflHotPlays, nflMarketMaps, type NflMarketMap, type Normalized } from '../data/normalize'
 import { evaluate, preGates, type GateContext, type TradeDecision, type VenueState } from '../rules/gates'
 import type { Position } from '../rules/stance'
 import { isOpen, ledger, type Ticket } from '../store/ledger'
+import { missed } from '../store/missed'
+import { keepSample } from '../store/samples'
+import { PlayTrail } from './trail'
 import { settingsStore } from '../store/settings'
 import { terms } from '../store/terms'
 import { KalshiVenue } from '../venues/kalshi'
+import { fillNflMoneylines, mapNflHotLines, mapNflHotProps, nflLadderEvents, nflPropEvents } from '../data/nflkalshi'
 import { PaperVenue } from '../venues/paper'
 import { PolymarketVenue } from '../venues/polymarket'
 import type { Venue } from '../venues/types'
@@ -36,6 +43,10 @@ const BOARD_EVERY_MS = 5 * 60_000 // pregame boards move slowly; live plays are 
 // inside the basic tier's 60 requests a minute.
 const NBA_LADDER_EVERY_MS = 30_000
 const NBA_PROPS_EVERY_MS = 30_000
+// NFL slips priced each pass, the likeliest first (2026-11-21).
+const NFL_SLIPS_PRICED = 20
+// A feed only switched off bots read, for the Board's preview.
+const PREVIEW_EVERY_MS = 5 * 60_000
 const LOCK_EVERY_MS = 30_000
 // Quotes a paper or dry run bot may ask for and never take, across the app,
 // in any hour; and how long a combo waits for makers to answer.
@@ -70,7 +81,7 @@ const REQUOTE_CONCURRENCY = 6
 const REQUOTE_SPACING_MS = 70
 // Gates that only restate a bot's own settings. The Board shows them live;
 // writing one ledger line per spread rung for them was 96% of the ledger.
-const SETTINGS_GATES = new Set(['sport_not_enabled', 'lane_not_enabled', 'phase_not_enabled', 'label_not_enabled', 'label_never_traded', 'not_measured', 'no_trigger', 'quarter_not_enabled', 'pick_only', 'not_our_pick'])
+const SETTINGS_GATES = new Set(['sport_not_enabled', 'lane_not_enabled', 'phase_not_enabled', 'label_not_enabled', 'label_never_traded', 'not_measured', 'no_trigger', 'quarter_not_enabled', 'pick_only', 'not_our_pick', 'prop_not_top', 'prop_side_off', 'pregame_wait', 'start_unknown'])
 // A bot is due a little early rather than a whole cycle late when the timer
 // and its Poll every line up.
 const POLL_SLACK_MS = 2000
@@ -103,7 +114,6 @@ export interface LimitsState {
   openLiveUsd: number
   capUsd: number
   liveBots: number
-  dryRun: boolean
   // Plays a limit held back today, one per bot and gate, most first.
   held: HeldBack[]
 }
@@ -125,6 +135,8 @@ export class Supervisor extends EventEmitter {
   private nflMaps: Record<string, NflMarketMap> = {}
   private nbaLadders = new Map<string, { at: number; rungs: unknown }>()
   private nbaPropsCache: { at: number; body: unknown } | null = null
+  // Feeds only switched off bots read, kept between their slower fetches.
+  private previewFeeds = new Map<string, { at: number; n: Normalized }>()
   // Ticket id -> settlement passes spent waiting to read an exit's last fills.
   private settleTries = new Map<string, number>()
   private rfqTimes: number[] = []
@@ -139,6 +151,8 @@ export class Supervisor extends EventEmitter {
   // One book read per signal per cycle, shared by every bot that looks at it.
   private requoting = new Map<string, Promise<Signal>>()
   private requoted = new Map<string, Signal>()
+  // Kalshi's recent prices, edge ages and player counts (bots/trail.ts).
+  private trail = new PlayTrail()
   private lastBookReadAt = 0
   private skipDay = today()
   // botId|gate -> the signals a money or pace limit held back today.
@@ -167,7 +181,14 @@ export class Supervisor extends EventEmitter {
   // The limits are worked out fresh, so a cap saved on Account shows at once.
   publicState(): Omit<SupervisorState, 'board' | 'verdicts'> & { limits: LimitsState; profitLock: LockState } {
     const { board: _b, verdicts: _v, ...rest } = this.state
-    return { ...rest, limits: this.limits(), profitLock: this.lockState() }
+    // Which venues have a key is known before the first cycle, so the Bots
+    // screen can grey out a venue with no key while the engine is stopped.
+    const venues = Object.fromEntries((Object.keys(this.venues) as VenueId[]).map((id) => [id, {
+      balanceUsd: this.state.venues[id]?.balanceUsd ?? null,
+      equityUsd: this.state.venues[id]?.equityUsd ?? null,
+      configured: this.venues[id].configured()
+    }]))
+    return { ...rest, venues, limits: this.limits(), profitLock: this.lockState() }
   }
 
   private limits(): LimitsState {
@@ -183,7 +204,6 @@ export class Supervisor extends EventEmitter {
       openLiveUsd: openCost(ledger.active(2).filter((t) => t.venue !== 'paper')),
       capUsd: account.accountMaxOpenExposureUsd,
       liveBots: bots.filter((b) => b.enabled && b.mode === 'live').length,
-      dryRun: account.executionMode === 'dry_run',
       held
     }
   }
@@ -285,12 +305,18 @@ export class Supervisor extends EventEmitter {
       // Bots that are switched off still load their sports and are evaluated
       // as a preview, so the Board can show what they would take.
       const everyBot = settingsStore.bots()
-      const feed = await this.feed(everyBot)
+      const fed = await this.feed(everyBot)
+      // The honest chance (shared/honest.ts) before any gate reads a play: the
+      // comeback record and the user's own record only ever lower our chance.
+      const calib = this.calibration()
+      const feed = { ...fed, signals: fed.signals.map((s) => withHonest(this.withStart(s), calib)) }
       this.state.signals = feed.signals.length
       this.state.refused = tally(feed.refused)
 
       this.requoting.clear()
       this.requoted.clear()
+      this.trail.prune(Date.now())
+      this.trail.noteCounts(feed.signals, Date.now())
       const prev = this.state.verdicts
       this.verdicts = {}
       // Poll every is per bot. The engine cycles at the fastest bot's pace and
@@ -307,7 +333,13 @@ export class Supervisor extends EventEmitter {
           return
         }
         this.lastRun.set(key, now)
-        await this.runBot(bot, account, feed.signals, venueStates, preview)
+        // One bot's fault never stops the others or the exits below.
+        try {
+          await this.runBot(bot, account, feed.signals, venueStates, preview)
+        } catch (err) {
+          if (err instanceof NotSignedInError || err instanceof PlanInactiveError) throw err
+          if (!preview) this.log(bot.id, bot.name, 'this cycle', 'bot_error', (err as Error).message.slice(0, 200))
+        }
       }
       for (const bot of bots) await run(bot, false)
       for (const bot of everyBot.filter((b) => !b.enabled)) await run(bot, true)
@@ -316,6 +348,8 @@ export class Supervisor extends EventEmitter {
       this.state.board = feed.signals.slice(0, 3000).map((s) => this.requoted.get(s.key) ?? s)
       this.state.verdicts = this.verdicts
 
+      // Paper bids every cycle, so one fills the moment the ask comes down.
+      await this.paperBids()
       // Exits every cycle, so a mark exit sells while the bid is still there.
       await this.manageExits()
       await this.checkProfitLock()
@@ -346,8 +380,30 @@ export class Supervisor extends EventEmitter {
     if (browsing) { sports.add('NBA'); sports.add('NFL') }
     const out: Normalized = { signals: [], refused: [] }
     const add = (n: Normalized): void => { out.signals.push(...n.signals); out.refused.push(...n.refused) }
+    // A feed that fails is shown as refused and the others still load, so an
+    // NFL outage never stops NBA bots or the exits (the API audit, 2026-11-20).
+    // Signed out or an inactive plan stops everything, as it must.
+    const safely = async (source: string, fn: () => Promise<void>): Promise<void> => {
+      try { await fn() } catch (err) {
+        if (err instanceof NotSignedInError || err instanceof PlanInactiveError) throw err
+        out.refused.push({ source, reason: (err as Error).message.slice(0, 80) })
+      }
+    }
+    // A feed only switched off bots read is for the Board's preview, so it is
+    // fetched every few minutes rather than every cycle: in November the MLB
+    // starter alone, switched off, cost a call every ten seconds (the API
+    // audit, 2026-11-20). A feed a bot that is on reads is fetched every cycle.
+    const running = new Set(bots.filter((b) => b.enabled).flatMap((b) => b.market.sports))
+    const feedFor = async (key: string, active: boolean, source: string, fn: () => Promise<void>): Promise<void> => {
+      const kept = this.previewFeeds.get(key)
+      if (!active && kept && now - kept.at < PREVIEW_EVERY_MS) { add(kept.n); return }
+      const s0 = out.signals.length
+      const r0 = out.refused.length
+      await safely(source, fn)
+      this.previewFeeds.set(key, { at: now, n: { signals: out.signals.slice(s0), refused: out.refused.slice(r0) } })
+    }
 
-    if (sports.has('NFL')) {
+    if (sports.has('NFL')) await feedFor('NFL', running.has('NFL'), 'nfl', async () => {
       if (now - this.lastBoardAt > BOARD_EVERY_MS) {
         const edges = await lazyedge.nflEdges()
         this.nflMaps = nflMarketMaps(edges)
@@ -359,6 +415,7 @@ export class Supervisor extends EventEmitter {
             // {game_id, as_of, n_rows, rows}; rows carry no timestamp of their
             // own, so the board's as_of stands in until the live requote.
             const res = await lazyedge.nflBoard(String(g.game_id))
+            keepSample(`nfl-board-${String(g.game_id)}`, res, now)
             const rows = (res?.rows ?? []).map((r: any) => ({ updated_at: res?.as_of, ...r }))
             const n = nflBoardRows(rows, now)
             const matchup = matchupOf(g)
@@ -371,14 +428,43 @@ export class Supervisor extends EventEmitter {
         this.boardCache = board
         this.lastBoardAt = now
       }
+      // Games the API's market map gives no moneyline ticker are matched to
+      // Kalshi's own game markets (data/nflkalshi.ts), board and hot plays alike.
+      const live = await lazyedge.nflLivePlays()
+      keepSample('nfl-live-plays', live, now)
+      const gameIds = [...Object.keys(this.nflMaps), ...this.boardCache.signals.map((s) => s.gameId), ...((live?.plays ?? []) as any[]).map((p) => String(p?.game_id ?? '')).filter(Boolean)]
+      add({ signals: [], refused: await this.matchNflMoneylines(gameIds) })
       // The board is cached for five minutes, so whether its game has kicked
       // off is worked out again every cycle.
-      add({ refused: this.boardCache.refused, signals: this.boardCache.signals.map((s) => ({ ...s, ...nflBoardPhase(this.nflMaps[s.gameId], now) })) })
-      add(nflHotPlays(await lazyedge.nflLivePlays(), now, this.nflMaps))
-    }
-    if (sports.has('MLB')) add(mlbEdges(await lazyedge.mlbEdges(), now))
-    if (sports.has('NBA')) {
+      add({ refused: this.boardCache.refused, signals: nflInfoToKalshi(this.boardCache.signals, this.nflMaps).map((s) => ({ ...s, ...nflBoardPhase(this.nflMaps[s.gameId], now) })) })
+      const hot = nflHotPlays(live, now, this.nflMaps)
+      // Live player props have no contract from the API; each is matched to
+      // its Kalshi market here, the way the slips' legs are.
+      const rungs = new Map<string, KalshiRung[]>()
+      for (const event of nflPropEvents(live, this.nflMaps)) {
+        const markets = await (this.venues.kalshi as KalshiVenue).eventMarkets(event)
+        if (markets) rungs.set(event, kalshiRungs(event, markets))
+      }
+      mapNflHotProps(live, hot, this.nflMaps, rungs)
+      // In game totals and spreads at a line the market map does not name
+      // take Kalshi's rung at that line from the game's full ladder.
+      const ladders = new Map<string, unknown[]>()
+      for (const event of nflLadderEvents(live, this.nflMaps)) {
+        const markets = await (this.venues.kalshi as KalshiVenue).eventMarkets(event)
+        if (markets) ladders.set(event, markets)
+      }
+      mapNflHotLines(live, hot, this.nflMaps, ladders)
+      add(hot)
+    })
+    if (sports.has('MLB')) await feedFor('MLB', running.has('MLB'), 'mlb', async () => { add(mlbEdges(await lazyedge.mlbEdges(), now)) })
+    if (sports.has('NBA')) await feedFor('NBA', running.has('NBA'), 'nba', async () => {
       const live = await lazyedge.nbaLive()
+      // Each game's scheduled tip, for the pregame window (agent guide: every
+      // NBA edge row carries tip_time, UTC).
+      for (const r of Array.isArray(live) ? live : []) {
+        const tip = r?.tip_time ? Date.parse(String(r.tip_time)) : NaN
+        if (r?.game_id && Number.isFinite(tip)) this.nbaTips.set(String(r.game_id), tip)
+      }
       add(nbaLiveEdges(live, now))
       // A bot that buys our pick reads /v1/nba/picks. If that cannot be read,
       // the picks are built from the live feed's own rows instead, and the
@@ -413,19 +499,21 @@ export class Supervisor extends EventEmitter {
         }
         add(nbaSpreadLadder(row, cached.rungs, now))
       }
-    }
+    })
     // Player props only load for a bot that trades the props lane: the slate
     // is several hundred rows, cached for 30s.
-    if (sports.has('NBA') && bots.some((b) => b.market.sports.includes('NBA') && b.market.lanes.includes('PROP'))) {
+    const props = (b: BotSettings): boolean => b.market.sports.includes('NBA') && b.market.lanes.includes('PROP')
+    if (sports.has('NBA') && bots.some(props)) await feedFor('NBA_PROP', bots.some((b) => b.enabled && props(b)), 'nba.props', async () => {
       if (!this.nbaPropsCache || now - this.nbaPropsCache.at > NBA_PROPS_EVERY_MS) {
         try {
           this.nbaPropsCache = { at: now, body: await lazyedge.nbaProps() }
         } catch (err) {
+          if (err instanceof NotSignedInError || err instanceof PlanInactiveError) throw err
           out.refused.push({ source: 'nba.props', reason: (err as Error).message.slice(0, 80) })
         }
       }
       if (this.nbaPropsCache) add(nbaProps(this.nbaPropsCache.body, this.nbaPropsCache.at))
-    }
+    })
     if (sports.has('WC')) {
       // Not wired yet: shown as refused so the gap is visible rather than
       // silently trading nothing.
@@ -451,7 +539,8 @@ export class Supervisor extends EventEmitter {
       }
     }
     const edges = quotes.filter((q) => q.ask !== null && signal.ourP !== null).map((q) => (signal.ourP! - q.ask!) * 100)
-    return { ...signal, quotes, edgePp: edges.length ? Math.max(...edges) : null }
+    const next = { ...signal, quotes, edgePp: edges.length ? Math.max(...edges) : null }
+    return { ...next, trail: this.trail.read(next, Date.now()) }
   }
 
   private async readVenues(): Promise<Partial<Record<VenueId, VenueState>>> {
@@ -462,6 +551,21 @@ export class Supervisor extends EventEmitter {
       this.state.venues[id] = { ...out[id]!, configured: v.configured() }
     }
     return out
+  }
+
+  // The moneyline tickers the API's NFL market map leaves out, from Kalshi's
+  // list of open NFL game markets. The list is kept ten minutes by the venue,
+  // so a cycle that needs nothing new costs nothing.
+  private async matchNflMoneylines(gameIds: string[]): Promise<{ source: string; reason: string }[]> {
+    // A finished game has no open market to find, so it is not looked for.
+    const need = [...new Set(gameIds)].filter((id) => !(this.nflMaps[id]?.kalshi_moneyline_home && this.nflMaps[id]?.kalshi_moneyline_away)
+      && !String(this.nflMaps[id]?.status ?? '').toUpperCase().includes('FINAL'))
+    if (!need.length) return []
+    const markets = await (this.venues.kalshi as KalshiVenue).openSeriesMarkets('KXNFLGAME')
+    if (!markets) return [{ source: 'nfl.kalshi-match', reason: "Kalshi's list of NFL game markets could not be read" }]
+    const r = fillNflMoneylines(this.nflMaps, need, markets)
+    this.nflMaps = r.maps
+    return r.refused
   }
 
   // ── Bots ─────────────────────────────────────────────────────────────
@@ -478,6 +582,9 @@ export class Supervisor extends EventEmitter {
     const tickets = ledger.active(2)
     const mine = tickets.filter((t) => t.botId === bot.id)
     const openKeys = new Set(mine.filter(isOpen).flatMap((t) => [t.signalKey, t.contract]))
+    // Real money picks other bots hold, read fresh for each bot: bots run one
+    // after another, so a pick bought earlier in this cycle is already here.
+    const othersHoldLive = new Map(tickets.filter((t) => t.botId !== bot.id && t.venue !== 'paper' && t.status !== 'dry_run' && isOpen(t)).map((t) => [t.signalKey, t.botName] as const))
     const asIf = preview ? { ...bot, enabled: true } : bot
     const verdict = (s: Signal, outcome: BotVerdict['outcome'], gate: string | null, detail: string): void => {
       ;(this.verdicts[s.key] ??= []).push({ botId: bot.id, botName: bot.name, enabled: !preview, outcome, gate, detail })
@@ -488,15 +595,19 @@ export class Supervisor extends EventEmitter {
     }
 
     const survivors: Signal[] = []
-    for (const raw of signals) {
+    // A combos only bot that buys the API's own combos takes no single play,
+    // so it reads none: its skips would only say why it did not buy what it
+    // never buys (2026-11-21).
+    const apiCombosOnly = bot.combo.source === 'api' && bot.combo.only && bot.market.lanes.includes('COMBO')
+    for (const raw of apiCombosOnly ? [] : signals) {
       if (!bot.market.sports.includes(raw.sport) || !bot.market.lanes.includes(raw.lane)) continue
       if (bot.market.phase !== 'both' && bot.market.phase !== raw.phase) continue
       // A pick signal is not a play for a bot that trades on the edge, any more
       // than another sport is.
-      if (raw.pickOnly && bot.entry.basis !== 'pick') continue
+      if (raw.pickOnly && bot.entry.basis !== 'pick') { if (!preview) missed.note(bot.id, raw, 'pick_only', 'our pick, for bots that buy our pick; this bot trades on the edge'); continue }
       if (!raw.quotes.length) { skip(raw, 'no_venue', 'no contract on this signal'); continue }
       if (bot.guards.onePositionPerMarket && (openKeys.has(raw.key) || raw.quotes.some((q) => openKeys.has(q.contract)))) { verdict(raw, 'holding', null, 'already holds this market'); continue }
-      const pre = preGates(raw, asIf, account, this.context(bot, raw, mine, tickets, venues, openKeys))
+      const pre = preGates(raw, asIf, account, this.context(bot, raw, mine, tickets, venues, openKeys, othersHoldLive))
       if (pre) { skip(raw, pre.gate, pre.detail); continue }
       survivors.push(raw)
     }
@@ -514,7 +625,7 @@ export class Supervisor extends EventEmitter {
     const legs: ComboLeg[] = []
     const legSignals = new Map<string, Signal>()
     for (const signal of fresh) {
-      const ctx = this.context(bot, signal, mine, tickets, venues, openKeys)
+      const ctx = this.context(bot, signal, mine, tickets, venues, openKeys, othersHoldLive)
       ctx.botTradesToday += pendingTrades
       ctx.gameExposureUsd += pendingGameUsd.get(signal.gameId) ?? 0
       ctx.accountOpenExposureUsd += pendingLiveUsd
@@ -533,7 +644,7 @@ export class Supervisor extends EventEmitter {
       if (combos && bot.combo.only) continue
       pendingTrades++
       pendingGameUsd.set(signal.gameId, (pendingGameUsd.get(signal.gameId) ?? 0) + decision.costUsd)
-      if (decision.venue !== 'paper' && !decision.dryRun) pendingLiveUsd += decision.costUsd
+      if (decision.venue !== 'paper') pendingLiveUsd += decision.costUsd
       // One per market, and no bet against it, even within a cycle.
       openKeys.add(signal.key)
       openKeys.add(decision.contract)
@@ -543,7 +654,12 @@ export class Supervisor extends EventEmitter {
       else candidates.push({ id: signal.key, signal, decision })
     }
 
-    if (combos && !preview && bot.decider.kind === 'rules') await this.tryCombo(bot, account, legs, legSignals)
+    if (combos && !preview && bot.decider.kind === 'rules') {
+      if (bot.combo.source === 'api') {
+        if (bot.market.sports.includes('NBA')) await this.apiTickets(bot, account)
+        if (bot.market.sports.includes('NFL')) await this.apiNflSlips(bot, account)
+      } else await this.tryCombo(bot, account, legs, legSignals)
+    }
     if (bot.decider.kind !== 'agent' || !bot.decider.provider || !candidates.length) return
     const screened = await screen(ai(bot.decider.provider), bot, candidates, this.guide)
     if (screened.error) this.log(bot.id, bot.name, `${candidates.length} tickets`, 'agent_error', `${screened.error}; nothing taken`)
@@ -585,7 +701,31 @@ export class Supervisor extends EventEmitter {
     if (wait > 0) await new Promise((res) => setTimeout(res, wait))
   }
 
-  private context(bot: BotSettings, signal: Signal, mine: Ticket[], all: Ticket[], venues: Partial<Record<VenueId, VenueState>>, openKeys: Set<string>): GateContext {
+  // The user's own record by lane, side and chance, worked out again every
+  // ten minutes: settlements arrive slowly and the ledger is read in full.
+  private calib: { at: number; map: Map<string, Calibration> } | null = null
+  private calibration(): Map<string, Calibration> {
+    if (!this.calib || Date.now() - this.calib.at > 10 * 60_000) this.calib = { at: Date.now(), map: calibrate(ledger.tickets(90)) }
+    return this.calib.map
+  }
+
+  // When a play's game starts, for the pregame window: the NBA tip from the
+  // edge rows, the NFL kickoff from the market map. Left unknown otherwise.
+  private nbaTips = new Map<string, number>()
+  private withStart(s: Signal): Signal {
+    if (s.startsAt != null) return s
+    const at = s.sport === 'NBA' ? this.nbaTips.get(s.gameId)
+      : s.sport === 'NFL' ? (() => { const k = this.nflMaps[s.gameId]?.kickoff; const t = k ? Date.parse(k) : NaN; return Number.isFinite(t) ? t : undefined })()
+        : undefined
+    return at === undefined ? s : { ...s, startsAt: at }
+  }
+
+  // The real venues with a saved key: the only places a bot prices or trades.
+  private keyed(): RealVenue[] {
+    return REAL_VENUES.filter((v) => this.venues[v].configured())
+  }
+
+  private context(bot: BotSettings, signal: Signal, mine: Ticket[], all: Ticket[], venues: Partial<Record<VenueId, VenueState>>, openKeys: Set<string>, othersHoldLive?: ReadonlyMap<string, string>): GateContext {
     const day = today()
     const todays = (ts: Ticket[]): Ticket[] => ts.filter((t) => today(t.createdAt) === day)
     const realised = (ts: Ticket[]): number => ts.reduce((s, t) => s + (t.pnlUsd ?? 0), 0)
@@ -600,7 +740,9 @@ export class Supervisor extends EventEmitter {
     return {
       now: Date.now(),
       venues,
+      keyed: this.keyed(),
       openMarketKeys: openKeys,
+      othersHoldLive,
       // A combo counts on every game it has a leg in, and its legs are
       // positions a single may not bet against.
       gamePositions: mine.filter((t) => isOpen(t)).flatMap((t) => t.legs
@@ -615,19 +757,23 @@ export class Supervisor extends EventEmitter {
       // Only entries that held contracts: an order whose answer was lost keeps
       // its key, so Kalshi still refuses it as a duplicate.
       entriesToday: todays(mine).filter((t) => t.signalKey === signal.key && t.filledContracts > 0).length,
-      gameEntriesToday: todays(mine).filter((t) => t.filledContracts > 0 && (t.gameId === signal.gameId || t.legs?.some((l) => l.gameId === signal.gameId))).length
+      gameEntriesToday: todays(mine).filter((t) => t.filledContracts > 0 && (t.gameId === signal.gameId || t.legs?.some((l) => l.gameId === signal.gameId))).length,
+      attemptsToday: todays(mine).filter((t) => t.signalKey === signal.key).length,
+      // Orders Kalshi answered as cancelled with nothing filled. Each is known
+      // to be over, so the next try needs its own id; a lost answer is not
+      // counted and keeps its key (2026-11-21: 25 "order already exists").
+      cancelledToday: todays(mine).filter((t) => t.signalKey === signal.key && t.status === 'cancelled' && t.filledContracts === 0).length
     }
   }
 
   private async place(bot: BotSettings, signal: Signal, d: TradeDecision, agentReason: string | null): Promise<void> {
-    // Re-read at the last moment. A kill switch, a switch back to dry run, a
-    // bot turned off or new terms, made while this cycle was running, win.
+    // Re-read at the last moment. A kill switch, a bot turned off or out of
+    // live, or new terms, made while this cycle was running, win.
     if (d.venue !== 'paper') {
       const account = settingsStore.account()
       const current = settingsStore.bots().find((b) => b.id === bot.id)
       const stop = account.killSwitch ? 'kill_switch' : !current?.enabled || current.mode !== 'live' ? 'bot_disabled' : !terms.status().accepted ? 'terms_not_accepted' : null
       if (stop) { this.skip(bot, signal, stop, 'changed while the cycle was running'); return }
-      d = { ...d, dryRun: d.dryRun || account.executionMode === 'dry_run' }
     }
     const res = await this.venues[d.venue].place(d)
     const now = Date.now()
@@ -646,9 +792,10 @@ export class Supervisor extends EventEmitter {
       error: res.error,
       play: playTags(signal),
       rules: rulesOf(bot),
-      // A dry run and a book that never filled hold nothing to sell. Kalshi,
-      // and paper priced off Kalshi, can sell; anything else holds to settlement.
-      exit: bot.exit.mode !== 'hold' && !d.dryRun && res.ok && res.status !== 'cancelled' && res.status !== 'rejected' && d.priceSource === 'kalshi' && (d.venue === 'paper' || d.venue === 'kalshi')
+      ...(d.rest ? { restS: d.autoCancelS } : {}),
+      // A book that never filled holds nothing to sell. Kalshi, and paper
+      // priced off Kalshi, can sell; anything else holds to settlement.
+      exit: bot.exit.mode !== 'hold' && res.ok && res.status !== 'cancelled' && res.status !== 'rejected' && d.priceSource === 'kalshi' && (d.venue === 'paper' || d.venue === 'kalshi')
         ? newExit(bot.exit.mode, res.avgFillC ?? d.limitPriceC, bot.exit.targetC, { now, afterMin: bot.exit.afterMin, atQuarterEnd: bot.exit.atQuarterEnd, period: signal.clock?.period ?? null })
         : null
     }
@@ -662,7 +809,7 @@ export class Supervisor extends EventEmitter {
     }
     const filled = res.filledContracts < d.contracts ? ` (${res.filledContracts} filled)` : ''
     const what = `${d.side.toUpperCase()} ${d.contracts} @ ${res.avgFillC ?? d.limitPriceC}c on ${d.venue}${d.venue === 'paper' ? ` (priced off ${d.priceSource})` : ''}${filled}`
-    this.log(bot.id, bot.name, signal.title, res.ok ? (d.dryRun ? 'dry_run' : res.status) : 'rejected', res.error ? `${what}: ${res.error}` : what)
+    this.log(bot.id, bot.name, signal.title, res.ok ? res.status : 'rejected', res.error ? `${what}: ${res.error}` : what)
     this.emit('ticket', ticket)
   }
 
@@ -672,7 +819,10 @@ export class Supervisor extends EventEmitter {
     // Every open trade, however old, so a week away still ends with each
     // settlement recorded. The list is in memory; only open ones reach a venue.
     for (const t of ledger.tickets(3650)) {
-      if (t.pnlUsd !== null || !['resting', 'partial', 'filled'].includes(t.status)) continue
+      // A fill under one contract was once settled with no result (fixed
+      // 2026-11-24); those are graded again here, from Kalshi's own result.
+      const ungraded = t.status === 'settled' && t.filledContracts > 0 && t.avgFillC !== null
+      if (t.pnlUsd !== null || !(['resting', 'partial', 'filled'].includes(t.status) || ungraded)) continue
       const venue = this.venues[t.venue]
       try {
         if (t.comboAccept && t.status === 'resting') { await this.resolveCombo(t); continue }
@@ -689,7 +839,7 @@ export class Supervisor extends EventEmitter {
           // Expiry is set on the order itself; this is the backstop if the
           // venue did not honour it.
           const bot = settingsStore.bots().find((b) => b.id === t.botId)
-          if (t.status === 'resting' && bot && Date.now() - t.createdAt > (bot.guards.autoCancelS + 30) * 1000) {
+          if (t.status === 'resting' && bot && Date.now() - t.createdAt > ((t.restS ?? bot.guards.autoCancelS) + 30) * 1000) {
             await venue.cancel(t.venueOrderId, t.contract)
             this.update(t, { status: t.filledContracts > 0 ? 'partial' : 'cancelled', costUsd: filledCost(t.filledContracts, t.avgFillC, t.limitPriceC) })
             continue
@@ -746,7 +896,7 @@ export class Supervisor extends EventEmitter {
         if (Date.now() - t.createdAt < ((bot?.guards.autoCancelS ?? 3600) + 60) * 1000) continue
       }
       const held = t.filledContracts - exit.filledContracts
-      if (held < 1 && !exit.pending) { this.recordExit(t, exit, 'everything held has sold'); continue }
+      if (nothingHeld(held) && !exit.pending) { this.recordExit(t, exit, 'everything held has sold'); continue }
       // Cashed out by hand: only an unconfirmed sell is still looked up.
       if (exit.cashout && !exit.pending) continue
       // A time exit waits for its minutes or its quarter's end, then sells at
@@ -767,34 +917,163 @@ export class Supervisor extends EventEmitter {
   // One combo a cycle at most, from the plays this bot approved this cycle,
   // one leg per game. The quote is read by shared/combos.ts and refused when it
   // does not add up. Paper and dry run ask makers for a real quote and never
-  // accept it (John, 2026-11-16), so they are capped per hour, only asked for
+  // accept it (2026-11-16), so they are capped per hour, only asked for
   // a combo the bot would really take, and withdrawn the moment it is read.
   // A live combo accepts the quote, reads its fill from Kalshi and checks the
   // price against the reading: a match confirms the reading, a mismatch
   // switches live combos off until the user looks at it. Until the reading is
   // confirmed, a live combo is one contract.
-  private async tryCombo(bot: BotSettings, account: AccountSettings, legs: ComboLeg[], signals: Map<string, Signal>): Promise<void> {
+  // The API's own NBA tickets (2026-11-21: "just want the combos the
+  // system has"): each night's tickets, our highest win chances built into
+  // two, three and four legs, bought as Kalshi combos once they lock, 20
+  // minutes before the night's first tip. Only money settings apply: the
+  // largest trade, the combos a day, paper or live. A ticket is bought when a
+  // real quote is at or under our chance that every leg wins, after the fee.
+  private apiTicketsCache: { at: number; body: any } | null = null
+  private async apiTickets(bot: BotSettings, account: AccountSettings): Promise<void> {
+    if (!this.apiTicketsCache || Date.now() - this.apiTicketsCache.at > 60_000) {
+      try { this.apiTicketsCache = { at: Date.now(), body: await lazyedge.nbaTickets() } } catch (err) {
+        this.log(bot.id, bot.name, 'NBA tickets', 'combo_skipped', `the tickets feed could not be read: ${(err as Error).message.slice(0, 120)}`)
+        return
+      }
+    }
+    const sizes = bot.combo.apiLegs as number[]
+    for (const pick of apiTicketPicks(this.apiTicketsCache.body, Date.now())) {
+      if (sizes.includes(pick.legs.length)) await this.tryCombo(bot, account, [], new Map(), pick)
+    }
+  }
+
+  // The API's NFL slips and same-game pairs (2026-11-21), mapped to Kalshi's
+  // prop markets (shared/nflcombos.ts), each leg's live ask read, ranked by
+  // our chance over the legs bought one by one, and the best tried up to the
+  // bot's combos a day, one combo a day per player. Only before each leg's
+  // game kicks off. A slip with a leg that does not map is left out, and the
+  // count of those is logged once a cycle.
+  private nflSlipsCache: { at: number; body: any } | null = null
+  private nflSlipsRanAt = new Map<string, number>()
+  private async apiNflSlips(bot: BotSettings, account: AccountSettings): Promise<void> {
+    if (Date.now() - (this.nflSlipsRanAt.get(bot.id) ?? 0) < 2 * 60_000) return
+    this.nflSlipsRanAt.set(bot.id, Date.now())
+    if (!this.nflSlipsCache || Date.now() - this.nflSlipsCache.at > 10 * 60_000) {
+      try { this.nflSlipsCache = { at: Date.now(), body: await lazyedge.nflSuggested() } } catch (err) {
+        this.log(bot.id, bot.name, 'NFL slips', 'combo_skipped', `the slips feed could not be read: ${(err as Error).message.slice(0, 120)}`)
+        return
+      }
+    }
+    const kalshi = this.venues.kalshi as KalshiVenue
+    const now = Date.now()
+    const slips = nflSlips(this.nflSlipsCache.body)
+    const gameCode = (gameId: string): string | null => {
+      const m = this.nflMaps[gameId]
+      if (!m) return null
+      const kick = m.kickoff ? Date.parse(m.kickoff) : NaN
+      if (!Number.isFinite(kick) || kick <= now || ['IN_PROGRESS', 'HALFTIME', 'FINAL'].some((s) => String(m.status ?? '').toUpperCase().includes(s))) return null
+      return kalshiGameCode(m.kalshi_moneyline_home ?? m.kalshi_moneyline_away)
+    }
+    // Read every event the slips need, once.
+    const rungs = new Map<string, KalshiRung[]>()
+    for (const s of slips) for (const l of s.legs) {
+      const code = gameCode(l.gameId)
+      const series = NFL_PROP_SERIES[l.stat]
+      if (!code || !series) continue
+      const event = `${series}-${code}`
+      if (rungs.has(event)) continue
+      const markets = await kalshi.eventMarkets(event)
+      if (markets) rungs.set(event, kalshiRungs(event, markets))
+    }
+    const ranked: Ranked[] = []
+    let unmapped = 0
+    const reasons = new Map<string, number>()
+    const mapped: { s: (typeof slips)[number]; legs: MappedLeg[] }[] = []
+    for (const s of slips) {
+      if (!(bot.combo.apiLegs as number[]).includes(s.legs.length)) continue
+      const legs: MappedLeg[] = []
+      let why = ''
+      for (const l of s.legs) {
+        const m = mapLeg(l, gameCode(l.gameId), (e) => rungs.get(e))
+        if (!m.leg) { why = `${l.player} ${l.side.toLowerCase()} ${l.line} ${l.stat}: ${m.why}`; break }
+        legs.push(m.leg)
+      }
+      if (!why && new Set(legs.map((l) => l.gameId + l.contract)).size !== legs.length) why = 'two legs on the same Kalshi market'
+      if (why) {
+        unmapped++
+        reasons.set(why.split(': ').pop()!.replace(/ for .*| within .*/, ''), (reasons.get(why.split(': ').pop()!.replace(/ for .*| within .*/, '')) ?? 0) + 1)
+        missed.combo(bot.id, s.key, { legs: s.legs.map((l) => ({ contract: '', side: l.side, title: `${l.player} ${l.side.toLowerCase()} ${l.line} ${l.stat}`, ourP: l.pSide })), chance: s.chance }, 'unmapped', why)
+        continue
+      }
+      mapped.push({ s, legs })
+    }
+    // Live prices for the likeliest slips only, so a week of pairs does not
+    // become hundreds of book reads a cycle.
+    for (const { s, legs } of mapped.sort((a, b) => b.s.chance - a.s.chance).slice(0, NFL_SLIPS_PRICED)) {
+      // Each leg's live ask on the side it buys.
+      let priced = true
+      for (const l of legs) {
+        await this.bookSlot()
+        const q = await kalshi.quote(l.contract, l.side).catch(() => null)
+        if (!q || q.ask === null) { priced = false; break }
+        l.askC = Math.round(q.ask * 100)
+        l.edgePp = (l.ourP - q.ask) * 100
+      }
+      if (!priced) {
+        unmapped++
+        reasons.set('no live price on a leg', (reasons.get('no live price on a leg') ?? 0) + 1)
+        missed.combo(bot.id, s.key, { legs, chance: s.chance }, 'no_price', 'a leg has no live ask on Kalshi')
+        continue
+      }
+      const legsPriceC = Math.round(legs.reduce((p, l) => p * (l.askC / 100), 1) * 10000) / 100
+      ranked.push({ slip: s, legs, legsPriceC, edgePp: s.chance * 100 - legsPriceC })
+    }
+    // One combo a day per player, counting combos already bought today.
+    const day = today()
+    const usedPlayers = new Set<string>()
+    const byTicker = new Map([...rungs.values()].flat().map((r) => [r.ticker, nameKey(r.player)]))
+    for (const t of ledger.active(2)) {
+      if (t.botId !== bot.id || !t.legs || today(t.createdAt) !== day || !(t.filledContracts > 0)) continue
+      for (const l of t.legs) { const p = byTicker.get(l.contract); if (p) usedPlayers.add(p) }
+    }
+    const boughtToday = ledger.active(2).filter((t) => t.botId === bot.id && t.signalKey.startsWith('combo:') && today(t.createdAt) === day && t.filledContracts > 0).length
+    const picks = rankSlips(ranked, { max: Math.max(0, bot.combo.maxPerDay - boughtToday), boughtKeys: new Set(), usedPlayers })
+    if (unmapped && now - (this.lastUnmappedLog ?? 0) > 30 * 60_000) {
+      this.lastUnmappedLog = now
+      const top = [...reasons.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${n} ${r}`).join('; ')
+      this.log(bot.id, bot.name, 'NFL slips', 'combo_skipped', `${unmapped} of ${slips.length} slips left out (${top}); ${ranked.length} mapped`)
+    }
+    for (const r of picks) await this.tryCombo(bot, account, [], new Map(), { legs: r.legs, chance: r.slip.chance, legsPriceC: r.legsPriceC, source: 'lazy_edge' })
+  }
+  private lastUnmappedLog: number | null = null
+
+  private async tryCombo(bot: BotSettings, account: AccountSettings, legs: ComboLeg[], signals: Map<string, Signal>, given?: ComboPick): Promise<void> {
     const kalshi = this.venues.kalshi as KalshiVenue
     const day = today()
     const all = ledger.active(2)
     const mine = all.filter((t) => t.botId === bot.id && t.signalKey.startsWith('combo:'))
     if (mine.filter((t) => today(t.createdAt) === day && t.filledContracts > 0).length >= bot.combo.maxPerDay) return
-    const pick = pickCombo(legs, bot.combo.legs)
+    const pick = given ?? pickCombo(legs, bot.combo.legs)
     if (!pick) return
+    // The API's tickets are taken as the API built them: no edge minimum
+    // beyond not paying more than our chance.
+    const minEdge = given ? 0 : bot.entry.minEdgePp
     const key = `combo:${pick.legs.map((l) => `${l.contract}:${l.side}`).sort().join('+')}`
     if (mine.some((t) => t.signalKey === key && (isOpen(t) || today(t.createdAt) === day))) return
     // The same combo is asked about again no sooner than 15 minutes later.
     if (Date.now() - (this.comboTried.get(key) ?? 0) < 15 * 60_000) return
     const titles = pick.legs.map((l) => l.title).join(' + ')
-    const say = (outcome: string, detail: string): void => this.log(bot.id, bot.name, `Combo: ${titles}`, outcome, detail)
+    const say = (outcome: string, detail: string): void => {
+      this.log(bot.id, bot.name, `Combo: ${titles}`, outcome, detail)
+      missed.combo(bot.id, key, pick, outcome, detail)
+    }
     // Quotes never come under what the legs cost one by one, so a combo that
-    // cannot clear the edge even there is not worth a request.
-    if (pick.chance * 100 - pick.legsPriceC < bot.entry.minEdgePp) return
+    // cannot clear the edge even there is not worth a request. Kept in the
+    // record only: on screen it would repeat every cycle.
+    if (pick.chance * 100 - pick.legsPriceC < minEdge) {
+      missed.combo(bot.id, key, pick, 'combo_skipped', `our ${(pick.chance * 100).toFixed(1)}% that every leg wins is under the legs' ${pick.legsPriceC}c one by one`)
+      return
+    }
     if (!kalshi.configured()) return say('combo_skipped', 'combos need a Kalshi key, even on paper, to ask for a quote')
 
-    const live = bot.mode === 'live' && bot.market.venues.includes('kalshi') && account.venues.kalshi.enabled
-    const dryRun = live && account.executionMode === 'dry_run'
-    const real = live && !dryRun
+    // A key is saved by now, so a live bot's combo is real money.
+    const real = bot.mode === 'live'
     const pricing = readComboPricing()
     // What one combo may spend: the bot's largest trade, never more than the
     // cash on hand, and for real money never past the account's open limit.
@@ -819,11 +1098,15 @@ export class Supervisor extends EventEmitter {
     let rfq: string | null = null
     let acceptTried = false
     try {
-      const collection = await kalshi.comboCollection(pick.legs.map((l) => eventOf(l.contract)))
-      if (!collection) return say('combo_skipped', 'Kalshi offers no combo with these legs')
-      const market = await kalshi.createCombo(collection, pick.legs.map((l) => ({ contract: l.contract, event: eventOf(l.contract), side: l.side })))
+      const found = await kalshi.comboCollection(pick.legs.map((l) => l.contract))
+      if ('missing' in found) return say('combo_skipped', `Kalshi offers no combo with these legs: ${found.missing.join(', ')}`)
+      const market = await kalshi.createCombo(found.ticker, pick.legs.map((l, i) => ({ contract: l.contract, event: found.events[i]!, side: l.side })))
       // Until a live fill confirms how quotes read, a real combo is one contract.
-      rfq = await kalshi.createRfq(market, real && !pricing.confirmed ? { contracts: 1 } : { budgetUsd })
+      // After that, a count that fits the budget at the highest price we would
+      // take: a request by dollar amount had every quote sized 0 (2026-11-23).
+      const ask = real && !pricing.confirmed ? 1 : comboRfqContracts(budgetUsd, pick.chance, minEdge, bot.size.maxContracts)
+      if (ask < 1) return say('combo_skipped', `not one contract fits the $${budgetUsd} budget at our ${(pick.chance * 100).toFixed(1)}%`)
+      rfq = await kalshi.createRfq(market, { contracts: ask })
       let best: ReturnType<typeof bestQuote<{ id: string; yesBidC: number; noBidC: number; contracts: number }>> = null
       for (let i = 0; i < COMBO_QUOTE_WAIT_S && !best; i++) {
         await new Promise((r) => setTimeout(r, 1000))
@@ -833,7 +1116,7 @@ export class Supervisor extends EventEmitter {
       const priceC = best.price.buyYesC!
       const reading = best.price.reading!
       const edge = pick.chance * 100 - priceC - kalshiFee(priceC / 100, 1) * 100
-      if (edge < bot.entry.minEdgePp) return say('combo_skipped', `quote ${priceC}c leaves ${edge.toFixed(1)}pp after fees against our ${(pick.chance * 100).toFixed(1)}%, under the ${bot.entry.minEdgePp}pp minimum`)
+      if (edge < minEdge) return say('combo_skipped', `quote ${priceC}c leaves ${edge.toFixed(1)}pp after fees against our ${(pick.chance * 100).toFixed(1)}%, under the ${minEdge}pp minimum`)
       const contracts = Math.floor(best.quote.contracts)
       // The maker sized the quote; it must still fit the budget at its price.
       // The first unconfirmed live combo is one contract, which may cost up to $1.
@@ -865,15 +1148,15 @@ export class Supervisor extends EventEmitter {
       if (!real) {
         // The quote is read, never taken: the paper fill is the quote's price
         // and size, with Kalshi's taker fee.
-        write(dryRun ? { ...base, status: 'dry_run' } : { ...base, filledContracts: contracts, avgFillC: priceC, costUsd: (contracts * priceC) / 100, feeUsd: exitFee(priceC, contracts, true) })
-        return say(dryRun ? 'dry_run' : 'filled', `YES ${contracts} @ ${priceC}c from a real quote, not taken`)
+        write({ ...base, filledContracts: contracts, avgFillC: priceC, costUsd: (contracts * priceC) / 100, feeUsd: exitFee(priceC, contracts, true) })
+        return say('filled', `YES ${contracts} @ ${priceC}c from a real quote, not taken`)
       }
 
-      // The last moment, as for any order: a kill switch, dry run, the bot
-      // off or out of live, or new terms, made while quotes were read, win.
+      // The last moment, as for any order: a kill switch, the bot off or out
+      // of live, or new terms, made while quotes were read, win.
       const nowAccount = settingsStore.account()
       const nowBot = settingsStore.bots().find((b) => b.id === bot.id)
-      const stop = nowAccount.killSwitch ? 'the kill switch is on' : nowAccount.executionMode === 'dry_run' ? 'dry run is on' : !nowBot?.enabled || nowBot.mode !== 'live' ? 'the bot was switched off or out of live' : !terms.status().accepted ? 'the terms need accepting' : null
+      const stop = nowAccount.killSwitch ? 'the kill switch is on' : !nowBot?.enabled || nowBot.mode !== 'live' ? 'the bot was switched off or out of live' : !terms.status().accepted ? 'the terms need accepting' : null
       if (stop) return say('combo_skipped', `${stop}; the quote was not taken`)
 
       const acceptedAt = Date.now()
@@ -994,7 +1277,7 @@ export class Supervisor extends EventEmitter {
     if (balanceUsd === null) return null
     let marked = 0
     for (const t of ledger.active(2)) {
-      if (t.venue !== 'paper' || !isOpen(t) || t.filledContracts < 1) continue
+      if (t.venue !== 'paper' || !isOpen(t) || !(t.filledContracts > 0)) continue
       const held = t.filledContracts - (t.exit?.filledContracts ?? 0)
       const bid = await this.bidFor(t).catch(() => null)
       marked += bid ? (held * bid.bidC) / 100 : t.costUsd + t.feeUsd
@@ -1039,7 +1322,7 @@ export class Supervisor extends EventEmitter {
     const keep = (t: Ticket, why: string): void => { out.kept.push({ title: t.title, why }) }
     const kalshi = this.venues.kalshi
     for (const t of ledger.active(2)) {
-      if (!isOpen(t) || t.status === 'dry_run' || t.filledContracts < 1 || t.avgFillC === null) continue
+      if (!isOpen(t) || t.status === 'dry_run' || !(t.filledContracts > 0) || t.avgFillC === null) continue
       if ((scope === 'live' && t.venue === 'paper') || (scope === 'paper' && t.venue !== 'paper')) continue
       if (t.priceSource !== 'kalshi' || (t.venue !== 'paper' && t.venue !== 'kalshi')) { keep(t, `${t.venue} positions cannot be sold from the app yet`); continue }
       try {
@@ -1055,7 +1338,7 @@ export class Supervisor extends EventEmitter {
           }
         }
         const held = t.filledContracts - exit.filledContracts
-        if (held < 1) { this.recordExit(t, exit, 'everything held had sold'); continue }
+        if (nothingHeld(held)) { this.recordExit(t, exit, 'everything held had sold'); continue }
         const bid = await this.bidFor(t)
         if (!bid) { keep(t, 'nobody is bidding on it right now'); continue }
         if (onlyInProfit && bid.bidC <= t.avgFillC) { keep(t, `the bid ${bid.bidC}c is not above the ${t.avgFillC}c paid`); continue }
@@ -1194,7 +1477,7 @@ export class Supervisor extends EventEmitter {
       return this.log(t.botId, t.botName, t.title, 'exit_failed', `${exit.mode} sell refused: ${res.error}`)
     }
     const cleared: TicketExit = { ...exit, pending: null }
-    if (res.filledContracts < 1) return this.update(t, { exit: cleared })
+    if (!(res.filledContracts > 0)) return this.update(t, { exit: cleared })
     this.recordExit(t, addExitFill(cleared, { contracts: res.filledContracts, priceC: res.avgFillC ?? bid.bidC, feeUsd: res.feeUsd }), `${exit.mode} sold ${res.filledContracts} @ ${res.avgFillC ?? bid.bidC}c`)
   }
 
@@ -1204,6 +1487,35 @@ export class Supervisor extends EventEmitter {
     const done: TicketExit = allSold ? { ...exit, status: 'done', orderId: null } : exit
     this.update(t, allSold ? { exit: done, status: 'exited', pnlUsd: positionPnl({ ...t, exit: done }, null) } : { exit: done })
     this.log(t.botId, t.botName, t.title, allSold ? 'exited' : `exit_${exit.status}`, detail)
+  }
+
+  // A paper bid waits like a real one (2026-11-21): it fills only when the
+  // live ask on the venue it was priced off comes down to it, at its own
+  // price, no more contracts than the ask offers, with Kalshi's resting fee;
+  // past its wait it is cancelled with nothing filled. One partly filled is
+  // done, the rest cancelled, so a paper record never assumes a later fill.
+  private async paperBids(): Promise<void> {
+    for (const t of ledger.active(1)) {
+      if (t.venue !== 'paper' || t.status !== 'resting' || !t.restS) continue
+      const book = await this.venues[t.priceSource].quote(t.contract, t.side).catch(() => null)
+      const askC = book?.ask == null ? null : Math.round(book.ask * 100)
+      if (askC !== null && askC <= t.limitPriceC) {
+        const filled = Math.min(t.contracts, Math.floor(book?.askSize ?? 0))
+        if (filled > 0) {
+          this.update(t, {
+            status: filled < t.contracts ? 'partial' : 'filled', filledContracts: filled, avgFillC: t.limitPriceC,
+            feeUsd: Math.ceil(kalshiFee(t.limitPriceC / 100, filled, false) * 100 - 1e-9) / 100,
+            costUsd: (filled * t.limitPriceC) / 100,
+            audit: [...t.audit, `paper bid filled ${filled} @ ${t.limitPriceC}c when the ask came down to ${askC}c`]
+          })
+          this.log(t.botId, t.botName, t.title, 'filled', `paper bid ${filled} @ ${t.limitPriceC}c`)
+          continue
+        }
+      }
+      if (Date.now() - t.createdAt > t.restS * 1000) {
+        this.update(t, { status: 'cancelled', costUsd: 0, error: `the bid at ${t.limitPriceC}c waited ${t.restS}s and the ask never came down to it` })
+      }
+    }
   }
 
   private update(t: Ticket, patch: Partial<Ticket>): void {
@@ -1226,8 +1538,11 @@ export class Supervisor extends EventEmitter {
   // ── Bookkeeping ──────────────────────────────────────────────────────
 
   private skip(bot: BotSettings, s: Signal, gate: string, detail: string): void {
-    // A gate that only restates the bot's settings is shown on the Board,
-    // not written: it was 96% of the ledger and explains nothing new.
+    // Every skip, of any gate, goes to the missed plays record with the play
+    // as it looked, so a night's skips can be graded against how they ended.
+    missed.note(bot.id, s, gate, detail)
+    // A gate that only restates the bot's settings is shown on the Board and
+    // kept out of the ledger (it was 96% of it).
     if (SETTINGS_GATES.has(gate)) return
     // One ledger line per bot, signal and gate per day, like the Python
     // decline throttle, so the record says why without a line every cycle.

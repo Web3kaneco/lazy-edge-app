@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { PRINT_WINDOW_S, summarize } from '@shared/accuracy'
 import { applyFix, fixText, undoFix, type Fix } from '@shared/fixes'
 import { analyze, MIN_GAMES, MIN_SETTLED, settled, type Segment } from '@shared/results'
+import { botRisk, botRiskLines } from '@shared/risk'
 import type { BotSettings } from '@shared/schema'
 import { diffSettings } from '@shared/share'
 import { ago, api, usd, type AccuracyState, type Ticket } from '../api'
@@ -19,12 +20,47 @@ const VERDICT: Record<Segment['verdict'], { text: string; cls: string }> = {
 const pct = (p: number): string => `${(p * 100).toFixed(1)}%`
 const cents = (c: number): string => `${c >= 0 ? '+' : '−'}${Math.abs(c).toFixed(1)}c`
 
+// Risk and reward (2026-11-21): how the money was really made or lost.
+// Win rate against what the prices needed, what our chances said against what
+// happened, average win against average loss, and long shots against
+// favorites, since chasing the edge mostly buys long shots.
+function RiskReward({ tickets, who }: { tickets: Ticket[]; who: string }) {
+  const r = useMemo(() => botRisk(tickets), [tickets])
+  if (!r) return null
+  return (
+    <div className="card" style={{ marginTop: 14 }}>
+      <h2>Risk and reward, {who}<Tip text="Every trade, by what it risked and what it paid. A long shot under 35c wins rarely and pays a lot; a favorite over 65c wins often and loses a lot when it loses. Both only pay if the chance was honest, so this sets what our chances said against what really happened." /></h2>
+      <ul className="small" style={{ margin: '4px 0 10px', paddingLeft: 18 }}>{botRiskLines(r).map((l) => <li key={l}>{l}</li>)}</ul>
+      <table className="small">
+        <thead><tr><th>Kind of play</th><th>Trades</th><th>Won</th><th>Profit</th><th>A contract</th></tr></thead>
+        <tbody>
+          {(['long shot', 'coin flip', 'favorite'] as const).map((s) => {
+            const x = r.byShape[s]
+            return (
+              <tr key={s}>
+                <td>{s === 'long shot' ? 'Long shot, under 35c' : s === 'coin flip' ? 'Coin flip, 35c to 65c' : 'Favorite, over 65c'}</td>
+                <td>{x.trades}</td>
+                <td>{x.trades ? `${x.won} (${Math.round((x.won / x.trades) * 100)}%)` : '—'}</td>
+                <td className={x.pnlUsd < 0 ? 'bad' : x.pnlUsd > 0 ? 'good' : ''}>{x.trades ? usd(x.pnlUsd) : '—'}</td>
+                <td>{x.trades ? cents(x.centsPerContract) : '—'}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export function Results() {
   const [days, setDays] = useState(30)
   const [venue, setVenue] = useState<Venue>('all')
   const [bot, setBot] = useState('all')
   const [fills, setFills] = useState<'all' | 'proven'>('all')
   const [tickets, setTickets] = useState<Ticket[]>([])
+  // Reading 30 days of trades takes a few seconds; until then the page says so
+  // rather than "nothing has settled".
+  const [loaded, setLoaded] = useState(false)
   const [acc, setAcc] = useState<AccuracyState | null>(null)
   const [allBots, setAllBots] = useState<BotSettings[]>([])
   const [fixing, setFixing] = useState<string | null>(null)
@@ -32,7 +68,8 @@ export function Results() {
   useEffect(reloadBots, [])
 
   useEffect(() => {
-    void api.tickets(days).then(setTickets)
+    setLoaded(false)
+    void api.tickets(days).then((t) => { setTickets(t); setLoaded(true) })
     return window.lazyedge.on('ticket', () => void api.tickets(days).then(setTickets))
   }, [days])
   useEffect(() => { void api.accuracy().then(setAcc) }, [tickets])
@@ -83,9 +120,9 @@ export function Results() {
           <div className="stat-label">{overall.won} won · {overall.lost} lost · from {overall.games} games · {open} still open</div>
         </div>
         <div className="card">
-          <h2>Win rate<Tip text="How often a trade paid out, against the win rate you needed to break even. Breakeven is the average price you paid: buying at 40c needs a 40% win rate before fees." /></h2>
+          <h2>Win rate<Tip text="How often a trade paid out, against the win rate you needed to break even. Breakeven is the average price paid a trade plus Kalshi's fee: buying at 40c needs a little over 40%. Both count each trade once. Every trade is the same dollar amount, so cheap plays buy more contracts, and profit can sit above or below what the win rate alone suggests." /></h2>
           <div className="stat">{n ? pct(overall.winRate) : '—'}</div>
-          <div className="stat-label">breakeven {n ? pct(overall.avgPrice) : '—'}</div>
+          <div className="stat-label">breakeven {n ? pct(overall.breakeven) : '—'} after fees</div>
         </div>
         <div className="card">
           <h2>Profit</h2>
@@ -99,6 +136,8 @@ export function Results() {
         </div>
       </div>
 
+      <RiskReward tickets={scoped} who={bot === 'all' ? 'All bots' : bots.find(([id]) => id === bot)?.[1] ?? 'This bot'} />
+
       <Accuracy tickets={base} acc={acc} setAcc={setAcc} />
 
       <div className="card" style={{ marginTop: 14 }}>
@@ -110,7 +149,7 @@ export function Results() {
               return (
                 <div key={i}>
                   <div className="help-term" style={{ gridTemplateColumns: '110px 1fr auto' }}>
-                    <span className={`pill ${r.kind === 'cut' ? 'live' : ''}`} style={r.kind === 'keep' ? { color: 'var(--good)', borderColor: 'rgba(0,200,83,.45)' } : undefined}>
+                    <span className={`pill ${r.kind === 'cut' ? 'live' : r.kind === 'keep' ? 'keep' : ''}`}>
                       {r.kind === 'cut' ? 'Cut' : 'Keep'} · {r.strength}
                     </span>
                     <span>{r.text}</span>
@@ -144,7 +183,7 @@ export function Results() {
                     <td className="num">{r.won}–{r.lost}</td>
                     <td className="num muted">{r.games}</td>
                     <td className="num">{pct(r.winRate)}</td>
-                    <td className="num muted">{pct(r.avgPrice)}</td>
+                    <td className="num muted">{pct(r.breakeven)}</td>
                     <td className={`num ${r.pnlPerContractC < 0 ? 'bad' : 'good'}`}>{cents(r.pnlPerContractC)}</td>
                     <td className={`num ${r.pnlUsd < 0 ? 'bad' : 'good'}`}>{usd(r.pnlUsd)}</td>
                     <td className={`small ${VERDICT[r.verdict].cls}`}>{VERDICT[r.verdict].text}</td>
@@ -155,7 +194,8 @@ export function Results() {
           </div>
         ))}
       </div>
-      {!n && <p className="muted">Nothing has settled in this window yet. Results appear here as games finish and the venue settles each market.</p>}
+      {!loaded && <p className="muted">Reading your trades…</p>}
+      {loaded && !n && <p className="muted">Nothing has settled in this window yet. Results appear here as games finish and the venue settles each market.</p>}
     </>
   )
 }

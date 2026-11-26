@@ -22,13 +22,18 @@ export function limitsSummary(bot: BotSettings, account: AccountSettings): Limit
   const lines: string[] = []
   const warnings: string[] = []
 
-  const sizedOn = size.bankrollUsd > 0 ? `a ${money(size.bankrollUsd)} bankroll` : 'your live balance'
-  lines.push(`Each trade costs at most ${money(size.maxTradeUsd)}, sized by Kelly against ${sizedOn}.`)
-  lines.push(`At most ${guards.maxTradesPerDay} new trades a day. The day runs ${DAY_TEXT}, so a late West Coast game counts with the night it started.`)
-  lines.push(`On its busiest day it could put up to ${money(busiest)} into trades (${guards.maxTradesPerDay} at ${money(size.maxTradeUsd)}). Trades that settle free their money, so far less is usually open at once.`)
+  const sizedOn = size.bankrollUsd > 0 ? `a ${money(size.bankrollUsd)} bankroll` : live ? 'your live balance' : 'your paper balance'
+  lines.push(size.sizing === 'flat'
+    ? `Every trade is ${money(size.maxTradeUsd)}, the same each time.`
+    : `Each trade costs at most ${money(size.maxTradeUsd)}, sized by Kelly against ${sizedOn}.`)
+  if (live) {
+    lines.push(`At most ${guards.maxTradesPerDay} new trades a day. The day runs ${DAY_TEXT}, so a late West Coast game counts with the night it started.`)
+    lines.push(`On its busiest day it could put up to ${money(busiest)} into trades (${guards.maxTradesPerDay} at ${money(size.maxTradeUsd)}). Trades that settle free their money, so far less is usually open at once.`)
+  } else {
+    lines.push('As a paper test it has no daily trade limit and no loss stop, so it runs the whole night. Both apply once it is live.')
+  }
   lines.push(`No more than ${Math.round(size.maxGameEquityPct * 100)}% of the account's value on any one game.`)
-  const together = live ? `, or when your live bots together are down ${money(account.accountDailyDrawdownUsd)}` : ''
-  lines.push(`It stops opening trades for the day once its settled trades are down ${money(guards.maxDailyDrawdownUsd)} after fees${together}. Open trades count when they settle, and deposits and withdrawals never count.`)
+  if (live) lines.push(`It stops opening trades for the day once its settled trades are down ${money(guards.maxDailyDrawdownUsd)} after fees, or when your live bots together are down ${money(account.accountDailyDrawdownUsd)}. Open trades count when they settle, and deposits and withdrawals never count.`)
   lines.push(`It checks for new plays every ${Math.max(bot.pollS, 10)} seconds.`)
   if (live) lines.push(`Across every live bot together, at most ${money(cap)} is open at once. That is the Maximum open exposure on the Account screen, and it is what caps how much is in play.`)
   else lines.push('This bot trades practice money, so the open exposure limit on the Account screen does not apply to it.')
@@ -45,7 +50,7 @@ export function limitsSummary(bot: BotSettings, account: AccountSettings): Limit
   if (size.minTradeUsd > size.maxTradeUsd) {
     warnings.push(`The ${money(size.minTradeUsd)} minimum per trade is above the ${money(size.maxTradeUsd)} maximum, so every trade is held to the maximum.`)
   }
-  if (guards.maxDailyDrawdownUsd < size.maxTradeUsd) {
+  if (live && guards.maxDailyDrawdownUsd < size.maxTradeUsd) {
     warnings.push(`One losing ${money(size.maxTradeUsd)} trade is enough to hit the ${money(guards.maxDailyDrawdownUsd)} daily stop.`)
   }
   if (live && guards.maxDailyDrawdownUsd > account.accountDailyDrawdownUsd) {

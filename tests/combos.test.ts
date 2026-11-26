@@ -55,7 +55,15 @@ describe('combos, 2026-11-16', () => {
   it('reads bots saved before combos as two legs, five a day, not combos only', () => {
     const old: Record<string, any> = structuredClone(defaultBot('old', 'old'))
     delete old.combo
-    expect(BotSettings.parse(old).combo).toEqual({ legs: 2, maxPerDay: 5, only: false })
+    expect(BotSettings.parse(old).combo).toEqual({ legs: 2, maxPerDay: 5, only: false, source: 'built', apiLegs: [2, 3, 4] })
+  })
+
+  it("a bot saved before the leg choice buys the API's combos of every size, as it did", () => {
+    const old: Record<string, any> = structuredClone(defaultBot('old', 'old'))
+    old.combo = { legs: 2, maxPerDay: 5, only: true, source: 'api' }
+    expect(BotSettings.parse(old).combo.apiLegs).toEqual([2, 3, 4])
+    old.combo.apiLegs = []
+    expect(BotSettings.safeParse(old).success).toBe(false)
   })
   it('lets a confirmed reading decide a quote at 100, and the side to accept follows it', () => {
     expect(quotePrice(40, 60, 35, 'one_minus_no_bid')).toMatchObject({ buyYesC: 40, reading: 'one_minus_no_bid' })

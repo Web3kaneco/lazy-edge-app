@@ -16,7 +16,13 @@ export const Fix = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('priceCeiling'), c: z.number().int().min(1).max(99) }),
   z.object({ kind: z.literal('minEdge'), pp: z.number().min(0).max(50) }),
   z.object({ kind: z.literal('maxTrailing'), points: z.number().int().min(0).max(60) }),
-  z.object({ kind: z.literal('favoritesOnly') })
+  z.object({ kind: z.literal('favoritesOnly') }),
+  // From 0.9.2 (patterns on losses): raise the minimum chance, in one part of
+  // the game or all of them, and keep out of a game's last minutes.
+  z.object({ kind: z.literal('minChance'), when: z.enum(['pregame', 'Q1', 'Q2', 'Q3', 'Q4', 'all']), pct: z.number().min(1).max(99) }),
+  z.object({ kind: z.literal('finalSeconds'), s: z.number().int().min(1).max(2880) }),
+  // Props on the game's leading players only.
+  z.object({ kind: z.literal('propTop'), n: z.number().int().min(1).max(30) })
 ])
 export type Fix = z.infer<typeof Fix>
 
@@ -33,8 +39,13 @@ export function fixText(f: Fix): string {
     case 'minEdge': return `Raise the minimum edge to ${f.pp}pp`
     case 'maxTrailing': return f.points === 0 ? 'Never back a team that is behind' : `Never back a team more than ${f.points} points behind`
     case 'favoritesOnly': return 'Switch on Favorites only'
+    case 'minChance': return `Raise the minimum chance to hit to ${f.pct}%${f.when === 'all' ? '' : f.when === 'pregame' ? ' before the game' : ` in the ${ORDINAL[f.when]} quarter`}`
+    case 'finalSeconds': return `No entries in a game's last ${Math.round(f.s / 60)} minutes`
+    case 'propTop': return `Props only on the top ${f.n} players in each game`
   }
 }
+
+const ORDINAL = { Q1: '1st', Q2: '2nd', Q3: '3rd', Q4: '4th' } as const
 
 const backsTeams = (b: BotSettings): boolean => b.market.lanes.includes('MONEYLINE') || b.market.lanes.includes('SPREAD')
 
@@ -91,6 +102,23 @@ export function applyFix(bot: BotSettings, f: Fix): { next: BotSettings | null; 
       if (!backsTeams(b)) return no('it trades no moneyline or spread')
       if (b.entry.favoritesOnly) return no('already on')
       b.entry.favoritesOnly = true
+      break
+    case 'minChance': {
+      const keys = f.when === 'all' ? (['pregame', 'Q1', 'Q2', 'Q3', 'Q4'] as const) : [f.when]
+      let moved = false
+      for (const k of keys) if (b.entry.minChancePct[k] < f.pct) { b.entry.minChancePct[k] = f.pct; moved = true }
+      if (!moved) return no('already at or above it')
+      break
+    }
+    case 'finalSeconds':
+      if (b.market.phase === 'pregame') return no('it trades before the game only')
+      if (b.guards.noEntryFinalS >= f.s) return no('already keeps out that long')
+      b.guards.noEntryFinalS = f.s
+      break
+    case 'propTop':
+      if (!b.market.lanes.includes('PROP')) return no('it trades no player props')
+      if (b.market.propTopPlayers !== null && b.market.propTopPlayers <= f.n) return no('already that narrow')
+      b.market.propTopPlayers = f.n
       break
   }
   const parsed = BotSettings.safeParse(b)

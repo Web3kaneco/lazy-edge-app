@@ -34,7 +34,52 @@ const GROUPS: { title: string; target: string; lede: string; inputs: SecretInput
   { title: 'Ollama (local)', target: 'ollama', lede: 'A model running on this computer. No key, no cost.', inputs: [{ name: 'ai.ollamaUrl', label: 'Address', plain: true, hint: 'Usually http://127.0.0.1:11434' }] }
 ]
 
-export function Keys() {
+// The Lazy Edge API key comes first: every bot reads its data through it. It
+// is tested against the API before it is saved, unlike the venue keys.
+function LazyEdgeKey({ saved, onChange }: { saved: boolean; onChange: () => Promise<void> }) {
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const run = async (fn: () => Promise<{ ok: boolean; text: string }>): Promise<void> => {
+    setBusy(true); setMsg(null)
+    try { setMsg(await fn()) } catch (e) { setMsg({ ok: false, text: (e as Error).message }) } finally { setBusy(false) }
+  }
+  const save = (): Promise<void> => run(async () => {
+    const r = await api.setLazyEdgeKey(draft)
+    setDraft('')
+    await onChange()
+    return r.planInactive
+      ? { ok: false, text: 'Saved, but your Lazy Edge plan is not active, so bots get no data until it is.' }
+      : { ok: true, text: `Saved and working: ${r.tier} plan, key ${r.prefix}.` }
+  })
+  const test = (): Promise<void> => run(async () => {
+    const s = await api.authStatus()
+    if (!s.signedIn) return { ok: false, text: 'No key saved yet.' }
+    return s.error ? { ok: false, text: s.error } : { ok: true, text: `Working: ${s.usage?.tier} plan, key ${s.usage?.prefix}, ${s.usage?.calls_today} calls today.` }
+  })
+
+  return (
+    <div className="card">
+      <h2>Lazy Edge</h2>
+      <p className="small muted" style={{ marginTop: 0 }}>Every bot reads its games, prices and chances through your Lazy Edge API key. Make one at lazyedge.net/settings and paste it here. API access comes with a paid plan or 5 or more Lazy Lions in a linked wallet. The key is checked with Lazy Edge before it is saved.</p>
+      <div className="field" style={{ marginBottom: 10 }}>
+        <label>API key {saved ? <span className="good">· saved</span> : <span className="bad">· not set, bots cannot trade</span>}</label>
+        <input type="password" placeholder={saved ? 'Paste to replace' : ''} value={draft} onChange={(e) => setDraft(e.target.value)} autoComplete="off" />
+        <div className="row" style={{ marginTop: 4 }}>
+          <button className="btn primary" disabled={busy || !draft.trim()} onClick={save}>{busy ? 'Checking…' : 'Save'}</button>
+          {saved && <button className="btn ghost" disabled={busy} onClick={() => run(async () => { await api.removeLazyEdgeKey(); await onChange(); return { ok: true, text: 'Removed from this computer, and the engine is stopped. Revoke the key at lazyedge.net/settings to stop it everywhere.' } })}>Remove</button>}
+        </div>
+      </div>
+      <div className="row">
+        <button className="btn" disabled={busy || !saved} onClick={test}>Test connection</button>
+        {msg && <span className={`small ${msg.ok ? 'good' : 'bad'}`}>{msg.text}</span>}
+      </div>
+    </div>
+  )
+}
+
+export function Keys({ onLazyEdgeChange }: { onLazyEdgeChange: () => void }) {
   const [keys, setKeys] = useState<Record<string, { set: boolean; hint: string }>>({})
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [result, setResult] = useState<Record<string, { ok: boolean; detail: string } | 'testing'>>({})
@@ -64,6 +109,7 @@ export function Keys() {
       <p className="lede">Every key is encrypted by Windows for your user account and stays on this computer. The app can use a key; nothing, including this screen, can read one back.</p>
       {err && <p className="err">{err}</p>}
       <div className="grid cols-2">
+        <LazyEdgeKey saved={Boolean(keys['lazyedge.apiKey']?.set)} onChange={async () => { await load(); onLazyEdgeChange() }} />
         {GROUPS.map((g) => {
           const r = result[g.target]
           return (

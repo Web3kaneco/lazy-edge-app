@@ -5,8 +5,9 @@
 // rather than leaving a bot with no answer.
 import Anthropic from '@anthropic-ai/sdk'
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod'
+import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod'
 import { vault } from '../store/vault'
-import type { AiProvider, JsonRequest } from './types'
+import type { AiProvider, JsonRequest, ToolRequest } from './types'
 
 const DEFAULT_MODEL = 'claude-opus-5-5'
 
@@ -44,6 +45,43 @@ export class AnthropicProvider implements AiProvider {
     if (response.stop_reason === 'max_tokens') throw new Error('The model ran out of room before finishing')
     const text = response.content.flatMap((b: any) => (b.type === 'text' ? [b.text] : [])).join('')
     return req.schema.parse(JSON.parse(text))
+  }
+
+  // The desk's questions with data tools, through the SDK's tool runner: it
+  // runs each tool the model asks for, sends the result back with the
+  // model's turn appended whole (thinking blocks included), and stops when
+  // the model answers or the turn cap is reached. Tools run here, locally.
+  async askWithTools(req: ToolRequest): Promise<string> {
+    const tools = req.tools.map((t) => betaZodTool({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.input,
+      run: async (input) => {
+        try {
+          // Capped, so one large feed cannot fill the conversation.
+          return JSON.stringify(await t.run(input)).slice(0, 24_000)
+        } catch (err) {
+          return JSON.stringify({ error: (err as Error).message.slice(0, 300) })
+        }
+      }
+    }))
+    const final = await this.client().beta.messages.toolRunner({
+      model: req.model || DEFAULT_MODEL,
+      max_tokens: 16000,
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'medium' },
+      system: req.system,
+      tools,
+      max_iterations: req.maxTurns,
+      messages: [{ role: 'user', content: req.user }]
+    } as any)
+    if (final.stop_reason === 'refusal') throw new Error('The model declined this question')
+    const text = final.content.flatMap((b: any) => (b.type === 'text' ? [b.text] : [])).join('').trim()
+    if (final.stop_reason === 'tool_use' || !text) throw new Error('The model used every data lookup it was allowed before answering. Ask a narrower question.')
+    if (final.stop_reason === 'max_tokens') return `${text}\n\n(The answer was cut off.)`
+    return text
   }
 
   async models(): Promise<string[]> {

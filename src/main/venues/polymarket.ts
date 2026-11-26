@@ -14,7 +14,7 @@ import type { AccountSettings } from '@shared/schema'
 import type { ContractSide } from '@shared/signal'
 import type { TradeDecision, VenueState } from '../rules/gates'
 import { vault } from '../store/vault'
-import { DRY_RUN_RESULT, type OrderUpdate, type PlaceResult, type Quote, type Venue } from './types'
+import { type OrderUpdate, type PlaceResult, type Quote, type Venue } from './types'
 
 const HOST = 'https://clob.polymarket.com'
 // The exchange refuses a GTD order expiring sooner than a minute out.
@@ -104,7 +104,6 @@ export class PolymarketVenue implements Venue {
   }
 
   async place(order: TradeDecision): Promise<PlaceResult> {
-    if (order.dryRun) return DRY_RUN_RESULT(order)
     try {
       const client = await this.trading()
       const [tickSize, negRisk] = await Promise.all([client.getTickSize(order.contract), client.getNegRisk(order.contract)])

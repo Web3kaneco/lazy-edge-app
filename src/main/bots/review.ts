@@ -140,8 +140,8 @@ export function reviewPlay(t: Ticket, bot: BotSettings | null, ev: Evidence, his
   if (kind && like.length >= MIN_SETTLED) {
     const won = like.filter((h) => (h.pnlUsd ?? 0) > 0).length
     const net = like.reduce((s, h) => s + (h.pnlUsd ?? 0), 0)
-    const contracts = like.reduce((s, h) => s + h.filledContracts, 0)
-    const avgPrice = contracts ? like.reduce((s, h) => s + h.filledContracts * (h.avgFillC ?? h.limitPriceC), 0) / contracts / 100 : 0
+    // Each trade once, as the win rate counts them, fee included (2026-11-24).
+    const avgPrice = like.reduce((s, h) => s + (h.avgFillC ?? h.limitPriceC) / 100 + (h.filledContracts > 0 ? h.feeUsd / h.filledContracts : 0), 0) / like.length
     const record = `This bot's ${like.length} settled ${kind} plays won ${won} for ${money(net)} net`
     if (net < 0 && won / like.length < avgPrice) play('look', 'Track record', `${record}, winning less often than the prices it paid imply. The Results screen shows which settings are behind it.`)
     else play('info', 'Track record', `${record}.`)

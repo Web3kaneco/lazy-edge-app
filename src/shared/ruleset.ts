@@ -19,12 +19,11 @@ export const FEES = {
 } as const
 
 export const DEFAULT_ACCOUNT: AccountSettings = {
-  executionMode: 'dry_run', // runbook: dry run is the default, always
   killSwitch: false,
   venues: {
-    paper: { enabled: true, startingBalanceUsd: 1000 },
-    kalshi: { enabled: false, environment: 'production' },
-    polymarket: { enabled: false, accountType: 'email' }
+    paper: { startingBalanceUsd: 1000 },
+    kalshi: { environment: 'production' },
+    polymarket: { accountType: 'email' }
   },
   accountDailyDrawdownUsd: 50, // the server engine's UserConfig default
   accountMaxOpenExposureUsd: 200,
@@ -45,10 +44,15 @@ export function defaultBot(id: string, name: string): BotSettings {
       phase: 'both',
       quarters: ['Q1', 'Q2', 'Q3', 'Q4'],
       labels: ['PRICE_GAP', 'MEASURED'],
-      venues: ['paper']
+      venues: [],
+      propTopPlayers: null,
+      propSidesOff: []
     },
     entry: {
       minEdgePp: 5, // UserConfig.min_edge_threshold
+      maxEdgePp: null,
+      underEdgePp: null,
+      underFirstMin: null,
       minEvCents: 0.5, // MLB_MIN_EV_C
       edgeHaircut: 0.5, // MLB_EDGE_HAIRCUT, the 811 fill forensic
       priceBandC: [25, 75], // the hot plays work
@@ -60,7 +64,10 @@ export function defaultBot(id: string, name: string): BotSettings {
       favoritesOnly: false,
       basis: 'edge',
       pickGapPp: null,
-      maxSpreadC: null
+      maxSpreadC: null,
+      pregameWindowMin: 15,
+      orderType: 'take',
+      bidRestS: 300
     },
     size: {
       kellyMultiplier: 0.25, // the strategy plan's kelly_fraction default
@@ -71,10 +78,10 @@ export function defaultBot(id: string, name: string): BotSettings {
       maxGameEquityPct: 0.35, // MLB_MAX_GAME_EQUITY_PCT, the 255 contract weeks
       sizing: 'kelly'
     },
-    // Held to settlement until the user picks an exit; +10c is John's scalp.
+    // Held to settlement until the user picks an exit; +10c is the owner's scalp.
     exit: { mode: 'hold', targetC: 10, afterMin: 15, atQuarterEnd: false },
     // Used only with COMBO in the lanes.
-    combo: { legs: 2, maxPerDay: 5, only: false },
+    combo: { legs: 2, maxPerDay: 5, only: false, source: 'built', apiLegs: [2, 3, 4] },
     guards: {
       noEntryFinalS: 90, // the overtime wipeout
       noOvertime: true,

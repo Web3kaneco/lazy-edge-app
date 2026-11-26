@@ -1,20 +1,33 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell, type IpcMainInvokeEvent } from 'electron'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { release } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { dayBounds, tradingDay } from '@shared/day'
 import { mailtoUrl, REPORT_MAX } from '@shared/report'
 import { defaultBot } from '@shared/ruleset'
-import { AccountSettings, type BotSettings, type ProviderId } from '@shared/schema'
-import { STARTERS } from '@shared/starters'
+import { AccountSettings, BotSettings, type ProviderId } from '@shared/schema'
+import type { Change } from '@shared/share'
+import { STARTERS, starterChanges, starterOf, starterUpdate } from '@shared/starters'
+import { changeLines, fieldName } from '@shared/fields'
+import { levelFor, moneyChanges } from '@shared/levels'
+import { aiChanges, type AiChange } from './store/aiundo'
+import { rulesLine } from '@shared/desk'
+import { GATES } from '@shared/gatewords'
+import { patternBot, type Pattern } from '@shared/patterns'
+import { acceptedBot, trialBot } from '@shared/trials'
+import { liveProblem } from '@shared/venues'
+import { whyFacts } from '@shared/why'
 import type { CashOutResult } from '@shared/exits'
+import { DeskAction } from '@shared/desk'
 import { applyFix, Fix, fixText } from '@shared/fixes'
 import { changeNote, exportFiles, paperTestPlan, settingsChanges } from '@shared/testdata'
 import { draftStrategy } from './ai/strategy'
 import { ai, allProviders } from './ai/registry'
 import { accuracy } from './bots/accuracy'
 import { checkPlay } from './bots/review'
+import { Desk } from './bots/desk'
+import type { EngineView } from './bots/desktools'
 import { Supervisor } from './bots/supervisor'
 import { RELEASES_URL, SUPPORT_EMAIL } from './config'
 import { auth } from './data/auth'
@@ -34,6 +47,7 @@ const WRITABLE_SECRETS: readonly SecretName[] = [
 
 let win: BrowserWindow | null = null
 let supervisor: Supervisor
+let desk: Desk
 
 if (!app.requestSingleInstanceLock()) app.quit()
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus() } })
@@ -44,7 +58,10 @@ function createWindow(): void {
     height: 880,
     minWidth: 1024,
     minHeight: 680,
-    backgroundColor: '#0d0f12',
+    // Light by default; the page sets the user's theme before its first
+    // paint, and the window shows only once that paint is ready.
+    backgroundColor: '#f5f5f7',
+    show: false,
     title: `Lazy Edge Beta ${app.getVersion()}`,
     autoHideMenuBar: true,
     webPreferences: {
@@ -54,6 +71,7 @@ function createWindow(): void {
       nodeIntegration: false
     }
   })
+  win.once('ready-to-show', () => win?.show())
   // Keep the versioned title rather than the page's own.
   win.on('page-title-updated', (e) => e.preventDefault())
   // Links open in the user's browser, never inside the app window.
@@ -67,8 +85,30 @@ function createWindow(): void {
   win.webContents.on('will-navigate', stay)
   win.webContents.on('will-redirect', stay)
 
+  // A window whose page process dies is reloaded, at most three times in a
+  // minute so a page that dies on load cannot loop; trading runs here in the
+  // main process and carries on either way. Both are written to the crash log.
+  const reloads: number[] = []
+  win.webContents.on('render-process-gone', (_e, d) => {
+    crashLog(`window process gone: ${d.reason} (exit ${d.exitCode})`)
+    const now = Date.now()
+    while (reloads.length && now - reloads[0]! > 60_000) reloads.shift()
+    if (d.reason !== 'clean-exit' && reloads.length < 3 && win && !win.isDestroyed()) { reloads.push(now); win.webContents.reload() }
+  })
+  win.on('unresponsive', () => crashLog('window stopped responding'))
+  win.on('responsive', () => crashLog('window responding again'))
+
   if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   else void win.loadFile(join(__dirname, '../renderer/index.html'))
+}
+
+// userData/logs/crash.log: window crashes and screen errors, one line each.
+function crashLog(line: string): void {
+  try {
+    const dir = join(app.getPath('userData'), 'logs')
+    mkdirSync(dir, { recursive: true })
+    appendFileSync(join(dir, 'crash.log'), `${new Date().toISOString()} ${line.split('\n').join('\n    ')}\n`)
+  } catch { /* logging must never take the app down */ }
 }
 
 // True only for the app's own page: the packaged index.html, or the exact
@@ -172,10 +212,10 @@ function registerIpc(): void {
     if (!auth.signedIn()) return { signedIn: false }
     try { return { signedIn: true, usage: await lazyedge.usage() } } catch (err) { return { signedIn: true, error: (err as Error).message } }
   })
-  handle('auth:emailStart', (email: string) => auth.emailStart(String(email)))
-  handle('auth:emailVerify', (email: string, code: string) => auth.emailVerify(String(email), String(code)))
-  handle('auth:wallet', () => auth.walletSignIn())
-  handle('auth:signOut', async () => { supervisor.stop(); await auth.signOut() })
+  // The Lazy Edge key is tested before it is saved, so a typo never reaches the vault.
+  handle('auth:setKey', (key: string) => auth.setKey(String(key)))
+  // Without a key no bot has data to trade on, so the engine stops with it.
+  handle('auth:removeKey', async () => { supervisor.stop(); await auth.removeKey() })
 
   handle('keys:describe', () => vault.describe())
   handle('keys:set', async (name: SecretName, value: string) => {
@@ -205,10 +245,6 @@ function registerIpc(): void {
 
   handle('settings:account', () => settingsStore.account())
   handle('settings:saveAccount', (doc: unknown) => {
-    if ((doc as { executionMode?: string })?.executionMode === 'live') {
-      terms.require()
-      if (settingsStore.account().executionMode !== 'live') confirmNative('Turn off dry run?', 'Live bots that are switched on will send real orders to your venues.', 'Go live')
-    }
     // The day profit lock sells on its own, so switching it on or changing it
     // while on is confirmed natively, like going live.
     const lockNext = AccountSettings.shape.profitLock.safeParse((doc as { profitLock?: unknown })?.profitLock)
@@ -232,12 +268,55 @@ function registerIpc(): void {
     if (next?.enabled) terms.require()
     const before = settingsStore.bots().find((b) => b.id === next?.id)
     if (next?.enabled && next.mode === 'live' && !(before?.enabled && before.mode === 'live')) {
-      confirmNative(`Switch on "${String(next.name ?? 'this bot')}" in live mode?`, 'It will place real orders under its settings, subject to the dry run switch and the kill switch.', 'Switch on')
+      confirmNative(`Switch on "${String(next.name ?? 'this bot')}" in live mode?`, 'It will send real orders with your money to Kalshi or Polymarket, wherever you have a key saved, under its settings. Only the kill switch stops it.', 'Switch on')
     }
     const saved = saveLogged(doc)
     supervisor.restartTimer()
     return saved
   })
+  // Starter updates: what each starter bot could take or has taken, and the
+  // user's choice. Every change is written to the ledger like any save.
+  handle('starters:status', () => {
+    const pending = new Set(settingsStore.pendingStarters())
+    const out: Record<string, { pending: Change[] | null; replaced: Change[] | null }> = {}
+    for (const b of settingsStore.bots()) {
+      const s = starterOf(b.id)
+      if (!s) continue
+      const old = settingsStore.starterBackup(b.id)
+      const starter = BotSettings.parse(s.build())
+      // An update waiting: only what this version changed, never the user's
+      // own settings.
+      const update = pending.has(b.id) ? starterUpdate(b, starter, s.key) : []
+      const reset = starterChanges(b, starter)
+      out[b.id] = {
+        pending: update.length ? update : null,
+        replaced: old ? starterChanges(old, b) : null
+      }
+      // What Reset to the starter would change, even with no update waiting.
+      if (!update.length && reset.length) (out[b.id] as { reset?: Change[] }).reset = reset
+    }
+    return out
+  })
+  const logStarter = (before: BotSettings | undefined, after: BotSettings | null, what: string): void => {
+    if (!before || !after) return
+    const changes = settingsChanges(before, after)
+    note(after.id, changes.length ? `${changeNote(after.name, changes)} (${what})` : `${after.name}: ${what}, nothing changed`)
+    supervisor.restartTimer()
+  }
+  handle('starters:use', (id: string) => {
+    const before = settingsStore.bots().find((b) => b.id === String(id))
+    logStarter(before, settingsStore.useStarter(String(id), 'update'), "took this version's starter changes")
+  })
+  handle('starters:reset', (id: string) => {
+    const before = settingsStore.bots().find((b) => b.id === String(id))
+    logStarter(before, settingsStore.useStarter(String(id), 'reset'), 'reset to the starter, money kept')
+  })
+  handle('starters:keep', (id: string) => { settingsStore.keepMine(String(id)) })
+  handle('starters:undo', (id: string) => {
+    const before = settingsStore.bots().find((b) => b.id === String(id))
+    logStarter(before, settingsStore.restoreStarterBackup(String(id)), 'put the old settings back')
+  })
+  handle('starters:dismiss', (id: string) => { settingsStore.dropStarterBackup(String(id)) })
   handle('bots:delete', (id: string) => {
     const gone = settingsStore.bots().find((b) => b.id === String(id))
     settingsStore.deleteBot(String(id))
@@ -262,6 +341,213 @@ function registerIpc(): void {
     }
     supervisor.restartTimer()
     return { changed, skipped, before }
+  })
+  // The AI desk. Apply does only what the suggestion's own action says, which
+  // is a pause or a Results fix: both only narrow what a bot trades, so like
+  // results:apply they need no native confirm. Each is written to the ledger.
+  handle('desk:get', () => desk.state())
+  handle('desk:ask', () => desk.askNow())
+  handle('desk:ai', (on: boolean) => desk.setAi(Boolean(on)))
+  handle('desk:dismiss', (id: string) => desk.mark(String(id), 'dismissed'))
+  // ── AI changes: levels of confirmation, and a way back ───────────────
+  // Every AI change goes through here. Money, paper or live and venues are
+  // refused whole; a live bot asked to trade more gets a second window that
+  // names it; every change is logged and can be put back.
+  const applyAi = (doc: unknown, source: AiChange['source'], what: string): { bot: BotSettings; changeId: string | null } => {
+    const after = BotSettings.parse(doc)
+    const before = settingsStore.bots().find((b) => b.id === after.id)
+    if (!before) {
+      // A new bot from the AI starts in paper, whatever the draft says.
+      const saved = saveLogged({ ...after, mode: 'paper' })
+      note(saved.id, `${saved.name}: made by the AI (${source}), ${what}`.slice(0, 4000))
+      supervisor.restartTimer()
+      return { bot: saved, changeId: null }
+    }
+    const money = moneyChanges(before, after)
+    if (money.length) throw new Error(`The AI cannot change ${money.map((c) => fieldName(c.field).toLowerCase()).join(', ')}. Those stay yours.`)
+    const lv = levelFor(before, after)
+    if (!lv.changes.length) throw new Error('Nothing would change.')
+    if (lv.level === 3) {
+      confirmNative(`${before.name} trades real money. Let it trade more?`,
+        `This change lets a live bot take plays it skips now:\n${changeLines(lv.looser).map((c) => `• ${c.name}: ${c.from} to ${c.to}`).join('\n')}\n\nYou can put it back from the bot or the Desk.`,
+        'Let it trade more')
+    }
+    const change = aiChanges.record({ botId: before.id, source, what, before })
+    const saved = saveLogged(after)
+    note(saved.id, `${saved.name}: the change above came from the AI (${source}), ${what}`.slice(0, 4000))
+    supervisor.restartTimer()
+    return { bot: saved, changeId: change.id }
+  }
+  handle('ai:save', (doc: unknown, what: string) => applyAi(doc, 'ai box', String(what ?? '').slice(0, 300)))
+  handle('ai:changes', (botId?: string) => aiChanges.list(botId ? String(botId) : undefined))
+  handle('ai:undo', (id: string) => {
+    const c = aiChanges.get(String(id))
+    if (!c || c.undoneAt) throw new Error('That change was already put back.')
+    const now = settingsStore.bots().find((b) => b.id === c.botId)
+    if (!now) throw new Error('That bot no longer exists.')
+    // The settings as they were, run the way the bot runs now.
+    const back = { ...c.before, id: now.id, name: now.name, enabled: now.enabled, mode: now.mode, market: { ...c.before.market, venues: now.market.venues }, size: now.size, guards: { ...c.before.guards, maxDailyDrawdownUsd: now.guards.maxDailyDrawdownUsd } }
+    const lv = levelFor(now, back)
+    if (lv.level === 3) confirmNative(`${now.name} trades real money. Put the old settings back?`, `The old settings let it take plays it skips now:\n${changeLines(lv.looser).map((x) => `• ${x.name}: ${x.from} to ${x.to}`).join('\n')}`, 'Put them back')
+    saveLogged(back)
+    note(now.id, `${now.name}: put back the AI change from ${new Date(c.at).toLocaleString()} (${c.what})`.slice(0, 4000))
+    aiChanges.markUndone(c.id)
+    supervisor.restartTimer()
+    return aiChanges.list()
+  })
+  // ── Paper trials ─────────────────────────────────────────────────────
+  // Start from a desk suggestion (its id) or from an AI box draft (a bot).
+  handle('trial:start', (from: unknown, what?: string) => {
+    let proposed: BotSettings
+    let label: string
+    let recId: string | null = null
+    if (typeof from === 'string') {
+      const rec = desk.get(from)
+      if (!rec || !rec.action || rec.action.kind !== 'fix' || !rec.botId) throw new Error('Only a suggested settings change can be tried in paper.')
+      const bot = settingsStore.bots().find((b) => b.id === rec.botId)
+      if (!bot) throw new Error('That bot no longer exists.')
+      const action = DeskAction.parse(rec.action)
+      if (action.kind !== 'fix') throw new Error('Only a suggested settings change can be tried in paper.')
+      const { next, why } = applyFix(bot, action.fix)
+      if (!next) throw new Error(`${bot.name} would not change: ${why}.`)
+      proposed = next
+      label = rec.title
+      recId = rec.id
+    } else {
+      proposed = BotSettings.parse(from)
+      label = String(what ?? 'a change from the AI box')
+    }
+    const bots = settingsStore.bots()
+    const original = bots.find((b) => b.id === proposed.id)
+    if (!original) throw new Error('A trial needs the bot it tests.')
+    if (original.trial) throw new Error('This bot is itself a trial.')
+    if (bots.some((b) => b.trial?.of === original.id)) throw new Error(`${original.name} already has a trial running. Accept or drop it first.`)
+    const money = moneyChanges(original, proposed)
+    if (money.length) throw new Error(`The AI cannot change ${money.map((c) => fieldName(c.field).toLowerCase()).join(', ')}. Those stay yours.`)
+    const t = saveLogged(trialBot(original, proposed, label, Date.now()))
+    note(t.id, `${t.name}: a paper trial of ${original.name}, testing ${label}`.slice(0, 4000))
+    if (recId) desk.setTrial(recId, t.id)
+    supervisor.restartTimer()
+    desk.refresh()
+    return t
+  })
+  handle('trial:accept', (trialId: string) => {
+    const t = settingsStore.bots().find((b) => b.id === String(trialId) && b.trial)
+    if (!t) throw new Error('That trial has ended.')
+    const original = settingsStore.bots().find((b) => b.id === t.trial!.of)
+    if (!original) throw new Error('The bot it tested no longer exists.')
+    // The same levels as any AI change: a live bot asked to trade more says so.
+    applyAi(acceptedBot(original, t), 'trial', t.trial!.what)
+    settingsStore.deleteBot(t.id)
+    note(t.id, `${t.name}: accepted onto ${original.name} and ended`)
+    for (const r of desk.state().recs.filter((r) => r.trialId === t.id)) { desk.setTrial(r.id, null); desk.mark(r.id, 'applied') }
+    desk.refresh()
+    return desk.state()
+  })
+  handle('trial:drop', (trialId: string) => {
+    const t = settingsStore.bots().find((b) => b.id === String(trialId) && b.trial)
+    if (!t) throw new Error('That trial has ended.')
+    settingsStore.deleteBot(t.id)
+    note(t.id, `${t.name}: dropped; ${settingsStore.bots().find((b) => b.id === t.trial!.of)?.name ?? 'the bot'} keeps its settings`)
+    for (const r of desk.state().recs.filter((r) => r.trialId === t.id)) { desk.setTrial(r.id, null); desk.mark(r.id, 'dismissed') }
+    supervisor.restartTimer()
+    desk.refresh()
+    return desk.state()
+  })
+
+  // ── Explain, recap, ask, build ───────────────────────────────────────
+  handle('ai:why', async (botId: string) => {
+    const bot = settingsStore.bots().find((b) => b.id === String(botId))
+    if (!bot) throw new Error('That bot no longer exists.')
+    const day = tradingDay(Date.now())
+    const skips = ledger.events(2).filter((e) => e.type === 'skip' && e.botId === bot.id && tradingDay(e.at) === day) as { gate: string; detail: string }[]
+    const verdicts = Object.values(supervisor.state.verdicts).flat().filter((v) => v.botId === bot.id)
+    const facts = whyFacts({
+      bot, engineRunning: supervisor.state.running,
+      liveProblem: liveProblem(bot, settingsStore.account(), supervisor.publicState().venues),
+      verdicts, skipsToday: skips.map((s) => ({ gate: s.gate, detail: s.detail })),
+      tradesToday: ledger.tickets(2).filter((t) => t.botId === bot.id && tradingDay(t.createdAt) === day && t.filledContracts > 0).length,
+      gateWords: (g) => GATES[g] ?? g
+    })
+    return { ...facts, ...(await desk.why(facts, rulesLine(bot))) }
+  })
+  handle('desk:recap', () => desk.recap())
+  handle('desk:chat', (question: string, history: unknown) => desk.chat(String(question), Array.isArray(history) ? history.slice(-4) as { q: string; a: string }[] : []))
+  // A losing spot inside a bot: leave it out now (a narrowing change, level 1
+  // or 2, recorded and undoable), or try leaving it out on a paper copy first.
+  const patternChange = (key: string): { p: Pattern; bot: BotSettings; next: BotSettings } => {
+    const p = desk.state().patterns.find((x) => x.key === String(key))
+    if (!p || !p.fix || !p.botId) throw new Error('That spot is no longer in the record.')
+    const bot = settingsStore.bots().find((b) => b.id === p.botId)
+    if (!bot) throw new Error('That bot no longer exists.')
+    const { next, why } = applyFix(bot, p.fix)
+    if (!next) throw new Error(`${bot.name} would not change: ${why}.`)
+    return { p, bot, next }
+  }
+  handle('desk:patternFix', (key: string) => {
+    const { p, next } = patternChange(key)
+    applyAi(next, 'desk', `${fixText(p.fix!)}, from a losing spot: ${p.dimension.toLowerCase()} ${p.segment}`)
+    desk.refresh()
+    return desk.state()
+  })
+  // The app wide chat. Apply goes through applyAi like the AI box: money is
+  // refused, a live bot asked to trade more gets the second window, and the
+  // change can be put back. Try in paper runs it beside the bot instead.
+  handle('chat:apply', (id: string) => {
+    const p = desk.proposal(String(id))
+    const out = applyAi(p.bot, 'chat', p.request)
+    desk.dropProposal(p.id)
+    return out
+  })
+  handle('chat:trial', (id: string) => {
+    const p = desk.proposal(String(id))
+    const bot = settingsStore.bots().find((b) => b.id === p.botId)!
+    if (settingsStore.bots().some((b) => b.trial?.of === bot.id)) throw new Error(`${bot.name} already has a trial running. Accept or drop it first.`)
+    if (moneyChanges(bot, p.bot).length) throw new Error('The AI cannot change money settings.')
+    const t = saveLogged(trialBot(bot, p.bot, p.request.slice(0, 200), Date.now()))
+    note(t.id, `${t.name}: a paper trial of ${bot.name} from the chat, testing ${p.request}`.slice(0, 4000))
+    desk.dropProposal(p.id)
+    supervisor.restartTimer()
+    desk.refresh()
+    return t
+  })
+  handle('desk:patternTrial', (key: string) => {
+    const { p, bot, next } = patternChange(key)
+    if (settingsStore.bots().some((b) => b.trial?.of === bot.id)) throw new Error(`${bot.name} already has a trial running. Accept or drop it first.`)
+    const t = saveLogged(trialBot(bot, next, `${fixText(p.fix!)} (${p.dimension.toLowerCase()} ${p.segment} was losing)`, Date.now()))
+    note(t.id, `${t.name}: a paper trial of ${bot.name}, testing ${fixText(p.fix!)}`)
+    supervisor.restartTimer()
+    desk.refresh()
+    return desk.state()
+  })
+  handle('desk:patternBot', (key: string) => {
+    const p = desk.state().patterns.find((x) => x.key === String(key))
+    if (!p) throw new Error('That pattern is no longer in the record.')
+    terms.require()
+    const b = saveLogged(patternBot(p, Date.now()))
+    note(b.id, `${b.name}: made from a ${p.strength} pattern in the record, ${p.won} won and ${p.lost} lost, ${p.centsPerContract}c a contract over ${p.n} trades in ${p.games} games`)
+    supervisor.restartTimer()
+    desk.refresh()
+    return b
+  })
+  handle('desk:apply', (id: string) => {
+    const rec = desk.get(String(id))
+    if (!rec || rec.status !== 'new' || !rec.action || !rec.botId) throw new Error('This suggestion has nothing to apply.')
+    const bot = settingsStore.bots().find((b) => b.id === rec.botId)
+    if (!bot) throw new Error('That bot no longer exists.')
+    const action = DeskAction.parse(rec.action)
+    if (action.kind === 'pause') {
+      if (!bot.enabled) throw new Error(`${bot.name} is already off.`)
+      note(bot.id, `${bot.name}: paused from the AI desk, ${rec.title}`)
+      saveLogged({ ...bot, enabled: false })
+      supervisor.restartTimer()
+      return desk.mark(rec.id, 'applied')
+    }
+    const { next, why } = applyFix(bot, action.fix)
+    if (!next) throw new Error(`${bot.name} did not change: ${why}.`)
+    // A desk fix only narrows, so it is level 1 or 2; it is still recorded
+    // so it can be put back.
+    return desk.mark(rec.id, 'applied', applyAi(next, 'desk', fixText(action.fix)).changeId)
   })
   // Every paper bot switched on, and any starter not in the list added, the
   // way a user would do it by hand. Live bots are never touched.
@@ -300,10 +586,14 @@ function registerIpc(): void {
     return folder
   })
   // Write only: the renderer can put a share code on the clipboard, never read it.
+  handle('app:logError', (what: unknown) => { crashLog(`screen ${String(what).slice(0, 4000)}`) })
   handle('clipboard:write', (text: string) => clipboard.writeText(String(text).slice(0, REPORT_MAX)))
-  handle('bots:draft', async (sentence: string, provider: ProviderId, model?: string) => {
+  // With a bot, the AI edits that bot and never its money, name or mode;
+  // without one it drafts a new bot, off and in paper. Nothing is saved here.
+  handle('bots:draft', async (sentence: string, provider: ProviderId, bot?: unknown) => {
     const guide = await lazyedge.skill().catch(() => '')
-    return draftStrategy(ai(provider), String(sentence), guide, model)
+    const base = bot === undefined || bot === null ? undefined : BotSettings.parse(bot)
+    return draftStrategy(ai(provider), String(sentence), guide, undefined, base)
   })
 
   handle('ledger:tickets', (days?: number) => ledger.tickets(Math.min(Number(days) || 7, 3650)))
@@ -367,6 +657,13 @@ app.whenReady().then(async () => {
   settingsStore.init()
   settingsStore.seedStarters()
   ledger.init()
+  for (const name of settingsStore.migrateDryRun()) {
+    const bot = settingsStore.bots().find((b) => b.name === name)
+    note(bot?.id ?? null, `${name}: mode live -> paper. Dry run is gone and a bot's mode is now the only live switch, so a bot that was live under dry run starts in paper; switch it to Live to send real orders.`)
+  }
+  // After the dry run move, so a bot it put back in paper takes the update.
+  const starters = settingsStore.refreshStarters()
+  for (const b of starters.updated) note(b.id, `${b.name}: took this version's starter settings; the old settings are kept and can be put back on the Bots screen.`)
   try {
     await vault.init()
   } catch (err) {
@@ -376,7 +673,20 @@ app.whenReady().then(async () => {
     return
   }
   supervisor = new Supervisor()
-  supervisor.on('state', () => send('state', supervisor.publicState()))
+  desk = new Desk(() => supervisor.state.board, () => supervisor.state.verdicts, () => ({
+    account: () => settingsStore.account(),
+    engine: () => {
+      const s = supervisor.publicState()
+      return { running: s.running, lastCycleAt: s.lastCycleAt, lastError: s.lastError, recent: s.recent, venues: s.venues as EngineView['venues'] }
+    },
+    version: app.getVersion(),
+    guide: () => lazyedge.skill()
+  }))
+  desk.on('state', (s) => send('desk', s))
+  supervisor.on('state', () => {
+    send('state', supervisor.publicState())
+    if (supervisor.state.running) desk.tick()
+  })
   supervisor.on('ticket', (t) => send('ticket', t))
   // The day profit lock fired: the same cash out as the button, and the user
   // is told even if the window is behind something else.

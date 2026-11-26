@@ -1,6 +1,7 @@
 // One shape for every opportunity the API publishes, whatever the sport or
 // lane. src/main/data/normalize.ts builds these; the gates read only these.
 import type { Lane, Quarter, Sport, VenueId } from './schema'
+import type { Trail } from './trail'
 
 export type ContractSide = 'yes' | 'no'
 
@@ -65,6 +66,29 @@ export interface Signal {
   // Our pick on a game whose edge points at the other team, or has no edge
   // at all (2026-11-17). Only a bot that buys our pick reads it.
   pickOnly?: boolean
+  // In play, whether our pick differs from our last pregame call, held at the
+  // tip (API #981, pick_changed). Null when the feed does not say.
+  pickChanged?: boolean | null
+  // A player prop: its line, what the player had when it was priced, the
+  // side, and his team's points ahead (negative behind) when known.
+  // rank is the player's place in his game by our points projection, 1 the
+  // highest, null when the feed gives no projection.
+  // From 2026-11-24, the API's own times on the player's row: statsAt when
+  // its poller last wrote his box line (updated_at), pricedAt when c2 worked
+  // out his chance (c2_priced_at), both epoch ms; liveModel c2 or formula;
+  // minutes his minutes so far. Missing or null when the feed gives none.
+  prop?: { line: number; soFar: number | null; over: boolean; teamLead: number | null; rank?: number | null; statsAt?: number | null; pricedAt?: number | null; liveModel?: string | null; minutes?: number | null }
+  // What happened just before the play (shared/trail.ts), set on the live
+  // requote. Recorded only; no gate reads it.
+  trail?: Trail
+  // The honest chance (shared/honest.ts): ourP is the chance the gates read;
+  // rawP is the feed's own when the honest one is lower, and honestNotes say
+  // why. comeback is the measured record for the game's spot, NBA only.
+  rawP?: number | null
+  honestNotes?: string[]
+  // When the game starts, ms; null or missing when the feed does not say.
+  startsAt?: number | null
+  comeback?: { winP: number; trailingHome: boolean; deficit: number | null; bucket: string | null }
 }
 
 // Whether a signal is our pick: our number has the contract it buys paying
@@ -83,6 +107,17 @@ export function teamWinP(s: Pick<Signal, 'lane' | 'marketP' | 'team'>): number |
 
 // The quarter a live play is in: Q1 to Q4, OT past the fourth, null when the
 // feed gives no period.
+// Minutes played in the current quarter, from the game clock (NBA quarters
+// are 12 minutes, NFL 15). Null in overtime or when the clock cannot say.
+export function minutesIntoQuarter(signal: Pick<Signal, 'clock' | 'sport'>): number | null {
+  const c = signal.clock
+  if (!c || c.overtime || c.secondsRemaining === null || c.period === null || c.period < 1 || c.period > 4) return null
+  const len = signal.sport === 'NFL' ? 900 : 720
+  const left = c.secondsRemaining - (4 - c.period) * len
+  if (left < 0 || left > len) return null
+  return (len - left) / 60
+}
+
 export function quarterOf(signal: Pick<Signal, 'clock'>): Quarter | 'OT' | null {
   const p = signal.clock?.period
   if (signal.clock?.overtime || (p !== null && p !== undefined && p > 4)) return 'OT'
@@ -108,6 +143,25 @@ export interface PlayTags {
   quarter?: Quarter | 'OT' | 'Pregame' | null
   lead?: number | null
   teamWinP?: number | null
+  // From 0.9.2, on our pick in play: whether it changed from the pregame call.
+  pickChanged?: boolean | null
+  // From 0.9.2, where the play was (2026-11-21: "where was the play,
+  // can the AI know that"): game seconds left when bought, the market's price
+  // on the side bought, and for a prop its line, the player's total so far,
+  // over or under, and his team's score.
+  secondsLeft?: number | null
+  marketP?: number | null
+  propLine?: number | null
+  propSoFar?: number | null
+  propOver?: boolean | null
+  propTeamLead?: number | null
+  propRank?: number | null
+  // From 0.9.2: the feed's own chance when the honest chance was lower. ourP
+  // is then the honest one the trade was taken on.
+  rawP?: number | null
+  // From 2026-11-24: Kalshi's move, the edge's age, the player's count and
+  // the feed's times just before the play (shared/trail.ts).
+  trail?: Trail
 }
 
 export function playTags(s: Signal): PlayTags {
@@ -115,7 +169,13 @@ export function playTags(s: Signal): PlayTags {
     sport: s.sport, lane: s.lane, phase: s.phase, label: s.label, hot: Boolean(s.hot), measured: s.measured, edgePp: s.edgePp, ourP: s.ourP,
     quarter: s.phase === 'pregame' ? 'Pregame' : quarterOf(s),
     lead: s.phase === 'live' && isTeamPlay(s) ? s.team?.lead ?? null : null,
-    teamWinP: teamWinP(s)
+    teamWinP: teamWinP(s),
+    ...(s.pickChanged === undefined ? {} : { pickChanged: s.pickChanged }),
+    secondsLeft: s.phase === 'live' ? s.clock?.secondsRemaining ?? null : null,
+    marketP: s.marketP,
+    ...(s.prop ? { propLine: s.prop.line, propSoFar: s.prop.soFar, propOver: s.prop.over, propTeamLead: s.prop.teamLead, propRank: s.prop.rank ?? null } : {}),
+    ...(s.rawP != null && s.rawP !== s.ourP ? { rawP: s.rawP } : {}),
+    ...(s.trail ? { trail: s.trail } : {})
   }
 }
 

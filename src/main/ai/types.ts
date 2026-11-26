@@ -15,10 +15,32 @@ export interface JsonRequest<T> {
   depth: 'quick' | 'careful'
 }
 
+// A read only tool the model may call while it answers (2026-11-21: "a data
+// source that can come back and forth"). The app runs it locally, so keys
+// never leave this computer; the model sees only what run returns.
+export interface AiTool {
+  name: string
+  description: string
+  input: z.ZodObject<z.ZodRawShape>
+  run: (input: any) => Promise<unknown>
+}
+
+export interface ToolRequest {
+  system: string
+  user: string
+  tools: AiTool[]
+  // The most model turns before it must answer with what it has.
+  maxTurns: number
+  model?: string
+}
+
 export interface AiProvider {
   readonly id: ProviderId
   configured(): boolean
   json<T>(req: JsonRequest<T>): Promise<T>
+  // A plain text answer that may call tools first. Providers without it
+  // answer from the context they are given.
+  askWithTools?(req: ToolRequest): Promise<string>
   models(): Promise<string[]>
   test(): Promise<{ ok: boolean; detail: string }>
 }

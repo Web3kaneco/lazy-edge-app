@@ -14,7 +14,7 @@ Run Lazy Edge trading bots on your own Windows computer, with your own keys, und
 Then:
 
 1. **Run it.** Windows warns that the publisher is unknown, because the beta is not code signed yet. Choose **More info**, then **Run anyway**.
-2. **Accept the terms** and **sign in** to your Lazy Edge account (email code or wallet). The app gets its own Lazy Edge key for you; you never copy one.
+2. **Accept the terms** and add your **Lazy Edge API key**. Make one at lazyedge.net/settings and paste it on the app's **Keys** screen. The app opens without one, but bots have no data to trade on until it is in.
 3. **Switch on a bot.** Eleven starter bots are already in your list, switched off and trading practice money. Switch one on and press Start engine.
 4. **Optional:** to trade real money or use an AI, paste your exchange or AI keys on the app's **Keys** screen. They are encrypted by Windows and never leave your computer except to the venue or provider they belong to.
 
@@ -61,7 +61,7 @@ npm install
 npm run dev
 ```
 
-Sign in needs the Lazy Edge Supabase anon key at build time. Copy `.env.example` to `.env` and fill it in.
+No `.env` is needed to build. `.env.example` lists the optional API address override.
 
 ```bash
 npm test
@@ -79,7 +79,7 @@ npm run dist
 src/shared/      the settings schema, the measured ruleset, the signal shape
 src/main/rules/  fees, the fail closed side table, the gate stack
 src/main/venues/ paper, Kalshi, Polymarket behind one interface
-src/main/data/   the API client, sign in, the normaliser
+src/main/data/   the API client, the Lazy Edge key check, the normaliser
 src/main/ai/     four providers, strategy drafting, agent screening
 src/main/bots/   the supervisor and the accuracy check
 src/main/store/  the Windows vault, settings documents, the ledger
