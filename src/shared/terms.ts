@@ -3,7 +3,7 @@
 // legal text. Bump TERMS_VERSION whenever the text changes; every user then
 // accepts the new version before the engine will start again.
 
-export const TERMS_VERSION = '2026-11-07-beta'
+export const TERMS_VERSION = '2026-11-20-beta'
 
 export interface TermsSection {
   title: string
@@ -38,7 +38,7 @@ export const TERMS: TermsSection[] = [
     body: [
       'Trading event contracts can lose all of the money you commit. A measured record describes the past and does not predict the future. Models are estimates with measured error.',
       'Software can have faults. Data can arrive late or be wrong. Orders can be rejected, fill at a different price, fill only in part, or not fill at all. Venues can change their rules, fees or availability without notice.',
-      'Live bots start in dry run, which logs the orders they would place without sending them. Prove a bot in paper and dry run before letting it send real orders, and start with amounts you can afford to lose entirely.'
+      'Every bot trades practice money until you switch it to Live, and a live bot sends real orders with your money from that moment. Prove a bot in paper before switching it to Live, and start with amounts you can afford to lose entirely.'
     ]
   },
   {

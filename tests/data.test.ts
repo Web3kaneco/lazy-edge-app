@@ -152,6 +152,28 @@ describe('NFL hot plays', () => {
     expect(nflHotPlays({ plays: [play({})] }, NOW).signals[0]!.trigger).toBe(true)
     expect(nflHotPlays({ plays: [play({ why: [] })] }, NOW).signals[0]!.trigger).toBe(false)
   })
+
+  // 2026-11-26: on 23 November every live prop came with no clock and was
+  // refused on the clock gate.
+  const prop = (over: Record<string, unknown>) => play({ market: 'PROP', side: 'OVER', player: 'Samaje Perine', stat: 'receptions', line: 1.5, clock: undefined, qtr: undefined, ...over })
+
+  it('a prop with no clock takes its game clock from another play in the same reply', () => {
+    const n = nflHotPlays({ plays: [prop({}), play({ market: 'MONEYLINE', clock: 'Q2 6:30', qtr: 2 }), prop({ game_id: 'g2' })] }, NOW)
+    expect(n.signals[0]!.clock).toEqual({ period: 2, secondsRemaining: 2 * 900 + 390, overtime: false })
+    // Another game's clock is never borrowed.
+    expect(n.signals[2]!.clock).toBeNull()
+  })
+
+  it("takes the game's own clock when the reply lists games, and reads the prop's count so far", () => {
+    const n = nflHotPlays({ games: [{ game_id: 'g1', clock: '7:45', quarter: 3 }], plays: [prop({ current: 2 })] }, NOW)
+    expect(n.signals[0]!.clock).toEqual({ period: 3, secondsRemaining: 900 + 465, overtime: false })
+    expect(n.signals[0]!.prop?.soFar).toBe(2)
+  })
+
+  it("keeps a prop's own clock over the game's", () => {
+    const n = nflHotPlays({ plays: [prop({ game_clock: '1:10', period: 4 }), play({ market: 'MONEYLINE', clock: 'Q3 9:00', qtr: 3 })] }, NOW)
+    expect(n.signals[0]!.clock).toEqual({ period: 4, secondsRemaining: 70, overtime: false })
+  })
 })
 
 describe('hot plays priced through the market map', () => {
@@ -296,9 +318,23 @@ describe('NBA, LiveEdgeResponse', () => {
     expect(s!.edgePp).toBeCloseTo(6)
   })
 
-  it('refuses a stale or old signal, the 2026-05-26 postmortem', () => {
+  it('refuses a stale or wedged signal, the 2026-05-26 postmortem', () => {
     expect(nbaLiveEdges([{ ...row, signal_stale: true }], NOW).signals).toHaveLength(0)
-    expect(nbaLiveEdges([{ ...row, signal_age_s: 600 }], NOW).signals).toHaveLength(0)
+    expect(nbaLiveEdges([{ ...row, signal_age_s: 1600 }], NOW).signals).toHaveLength(0)
+  })
+
+  // 2026-11-20: a reading ages through every timeout and halftime with no
+  // plays, and the API says a quiet game is not stale.
+  it('trades through a timeout and halftime, when the reading only looks old', () => {
+    expect(nbaLiveEdges([{ ...row, signal_age_s: 240 }], NOW).signals).toHaveLength(1)
+    expect(nbaLiveEdges([{ ...row, signal_age_s: 1000 }], NOW).signals).toHaveLength(1)
+  })
+
+  it('refuses a fallback number that is not the model reading', () => {
+    const n = nbaLiveEdges([{ ...row, model_ready: false, skellam_status: 'PREGAME_FALLBACK' }], NOW)
+    expect(n.signals).toHaveLength(0)
+    expect(n.refused[0]!.reason).toBe('no model reading yet (pregame_fallback)')
+    expect(nbaLiveEdges([{ ...row, model_ready: true }], NOW).signals).toHaveLength(1)
   })
 
   it('HOLD is not a signal', () => {
@@ -356,6 +392,11 @@ describe('NBA, LiveEdgeResponse', () => {
     expect(parseNbaClock('1:05.3', 4)!.secondsRemaining).toBe(65)
     expect(parseNbaClock('3:00', 5)!.overtime).toBe(true)
     expect(parseNbaClock('', 0)).toBeNull()
+    // Between quarters the clock is not a time: before the 4th the later
+    // quarters are still to play; in the 4th nothing is assumed.
+    expect(parseNbaClock('Halftime', 2)).toEqual({ period: 2, secondsRemaining: 1440, overtime: false })
+    expect(parseNbaClock('END', 3)!.secondsRemaining).toBe(720)
+    expect(parseNbaClock('END', 4)!.secondsRemaining).toBeNull()
   })
 })
 
@@ -415,5 +456,25 @@ describe('NBA player props, 2026-11-16', () => {
   it('refuses a stat with no Kalshi contract rather than guessing', () => {
     const out = nbaProps(game({}, { pts_venue: 'fanduel' }), 0)
     expect(out.refused).toContainEqual({ source: 'nba.props', reason: 'no Kalshi contract' })
+  })
+
+  // The API audit, 2026-11-20: a live book past 10 cents wide is marked thin.
+  it('refuses a live prop whose book the API marks thin', () => {
+    const out = nbaProps(game({}, { pts_live_source: 'thin' }), 0)
+    expect(out.signals.map((s) => s.title)).not.toContainEqual(expect.stringContaining('points'))
+    expect(out.refused).toContainEqual({ source: 'nba.props', reason: 'book too thin, wider than 10 cents' })
+    expect(nbaProps(game({}, { pts_live_source: 'live' }), 0).signals).toHaveLength(2)
+  })
+
+  it('says when a player is on the bench and how likely he is to come back', () => {
+    const [pts] = nbaProps(game({}, { left_floor: true, p_back: 0.65 }), 0).signals
+    expect(pts!.why).toMatch(/on the bench, 65% to come back tonight/)
+  })
+})
+
+describe('MLB prices, the API audit 2026-11-20', () => {
+  it('a market price of 0 is no reading, never a price', () => {
+    const row = { game_pk: 7, home_team: 'TB', away_team: 'MIL', signal: 'NO_EDGE', p_home_win: 0.4, total_pick: 'UNDER 7.5', main_line: 7.5, our_p_over: 0.6, market_p_over: 0, total_edge_pp: 8, total_seam: true, total_line_ok: true, kalshi_totals_ticker: 'KXMLBTOTAL-99JAN011900MILTB-8' }
+    expect(mlbEdges([row], NOW).signals[0]!.marketP).toBeNull()
   })
 })

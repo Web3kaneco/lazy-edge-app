@@ -17,7 +17,7 @@ function ml(over: Partial<Signal> = {}): Signal {
     ourP: 0.6, marketP: 0.5, edgePp: 10, label: 'PRICE_GAP', kelly: null, trigger: false, measured: false,
     clock: { period: 4, secondsRemaining: 400, overtime: false },
     quotes: [{ venue: 'kalshi', contract: 'KXNBAGAME-99JAN01AAABBB-BBB', side: 'yes', ask: 0.5, askSize: 500, priceAgeS: 20 }],
-    why: null, receivedAt: NOW, team: { lead: -4, winP: 0.5 },
+    why: null, receivedAt: NOW, startsAt: NOW + 10 * 60_000, team: { lead: -4, winP: 0.5 },
     ...over
   }
 }
@@ -30,9 +30,9 @@ const bot = (over: (b: BotSettings) => void = () => {}): BotSettings => {
   over(b)
   return b
 }
-const account = () => { const a = structuredClone(DEFAULT_ACCOUNT); a.venues.kalshi.enabled = true; return a }
+const account = () => { const a = structuredClone(DEFAULT_ACCOUNT); return a }
 const ctx = (): GateContext => ({
-  now: NOW, venues: { paper: { balanceUsd: 1000, equityUsd: 1000 }, kalshi: { balanceUsd: 200, equityUsd: 200 } }, openMarketKeys: new Set(), gamePositions: [],
+  now: NOW, venues: { paper: { balanceUsd: 1000, equityUsd: 1000 }, kalshi: { balanceUsd: 200, equityUsd: 200 } }, keyed: ['kalshi'], openMarketKeys: new Set(), gamePositions: [],
   gameExposureUsd: 0, accountOpenExposureUsd: 0, botDailyPnlUsd: 0, accountDailyPnlUsd: 0, botTradesToday: 0
 })
 

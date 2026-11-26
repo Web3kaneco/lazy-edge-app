@@ -28,9 +28,9 @@ const q4 = (): BotSettings => {
   b.market.venues = ['kalshi']
   return b
 }
-const account = () => { const a = structuredClone(DEFAULT_ACCOUNT); a.venues.kalshi.enabled = true; return a }
+const account = () => { const a = structuredClone(DEFAULT_ACCOUNT); return a }
 const ctx = (over: Partial<GateContext> = {}): GateContext => ({
-  now: NOW, venues: { paper: { balanceUsd: 1000, equityUsd: 1000 }, kalshi: { balanceUsd: 200, equityUsd: 200 } }, openMarketKeys: new Set(), gamePositions: [],
+  now: NOW, venues: { paper: { balanceUsd: 1000, equityUsd: 1000 }, kalshi: { balanceUsd: 200, equityUsd: 200 } }, keyed: ['kalshi'], openMarketKeys: new Set(), gamePositions: [],
   gameExposureUsd: 0, accountOpenExposureUsd: 0, botDailyPnlUsd: 0, accountDailyPnlUsd: 0, botTradesToday: 0, ...over
 })
 

@@ -10,6 +10,13 @@
 // the bid offers.
 import { FEES } from './ruleset'
 
+// Kalshi fills and sells fractions of a contract (2026-11-23: 0.5, 0.12, 0.1),
+// to the hundredth. Nothing is held once less than a hundredth is left, which
+// also absorbs float dust from subtracting fills.
+export const nothingHeld = (contracts: number): boolean => !(contracts >= 0.01)
+// A contract count as Kalshi's fixed point string: 9 -> "9.00", 0.5 -> "0.50".
+export const countFp = (contracts: number): string => (Math.round(contracts * 100) / 100).toFixed(2)
+
 export type ExitMode = 'limit' | 'mark' | 'time'
 
 export interface TicketExit {
@@ -122,7 +129,8 @@ interface Position { filledContracts: number; avgFillC: number | null; feeUsd: n
 // was still held at settlement. Null while anything is still held and the
 // market has not settled.
 export function positionPnl(t: Position, settled: 'yes' | 'no' | null): number | null {
-  if (t.avgFillC === null || t.filledContracts < 1) return null
+  // Kalshi fills fractions of a contract (0.5, 0.12), so any fill counts.
+  if (t.avgFillC === null || !(t.filledContracts > 0)) return null
   const entry = t.avgFillC / 100
   const sold = Math.min(t.exit?.filledContracts ?? 0, t.filledContracts)
   const held = t.filledContracts - sold

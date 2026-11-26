@@ -23,6 +23,10 @@ export const ProviderId = z.enum(['anthropic', 'openai', 'xai', 'ollama'])
 
 // Labels the board publishes. ILLIQUID, ROLE_PRICED and UNPRICED are shown by
 // the API and never ranked, so no setting can allow them.
+// A player prop's stat and side, so one can be switched off (2026-11-24).
+export const PropSide = z.enum(['PTS over', 'PTS under', 'REB over', 'REB under', 'AST over', 'AST under'])
+export type PropSide = z.infer<typeof PropSide>
+
 export const TradeableLabel = z.enum(['PRICE_GAP', 'RATING_Q', 'LEAN', 'TAIL_RUNG', 'ROLE_Q', 'MEASURED'])
 export const NEVER_TRADE_LABELS = ['ILLIQUID', 'ROLE_PRICED', 'UNPRICED', 'NONE'] as const
 
@@ -31,18 +35,20 @@ const pct = z.number().min(0).max(1)
 const cents = z.number().min(1).max(99)
 
 export const AccountSettings = z.object({
-  // Global switch. 'dry_run' runs the entire path and logs the order it would
-  // place (runbook gate 4). Shipped default; the user flips it themselves.
-  executionMode: z.enum(['dry_run', 'live']),
+  // A bot's own mode is the only switch between practice and real money
+  // (2026-11-20): there is no account wide dry run, and a venue is in
+  // use when its key is saved, not by a toggle here. Older files still carry
+  // executionMode and the venue toggles; they are read once to move live
+  // bots that were held in dry run back to paper (settingsStore), then dropped.
   // Runbook gate 3. Stops every real order on the next signal.
   killSwitch: z.boolean(),
   venues: z.object({
-    paper: z.object({ enabled: z.boolean(), startingBalanceUsd: usd }),
-    kalshi: z.object({ enabled: z.boolean(), environment: z.enum(['production', 'demo']) }),
+    paper: z.object({ startingBalanceUsd: usd }),
+    kalshi: z.object({ environment: z.enum(['production', 'demo']) }),
     // 'email' covers email and Magic logins (a Polymarket proxy wallet),
     // 'browser_wallet' a MetaMask style login (a Gnosis safe), and 'eoa' a
     // plain wallet trading for itself. This decides the order signature type.
-    polymarket: z.object({ enabled: z.boolean(), accountType: z.enum(['email', 'browser_wallet', 'eoa']) })
+    polymarket: z.object({ accountType: z.enum(['email', 'browser_wallet', 'eoa']) })
   }),
   // The account cap above every bot (decision 12): the bots together cannot
   // lose more than this today, however many are switched on.
@@ -64,8 +70,9 @@ export const BotSettings = z.object({
   id: z.string().min(1),
   name: z.string().min(1).max(80),
   enabled: z.boolean(),
-  // 'paper' trades the local ledger regardless of the account mode. 'live'
-  // sends to real venues, and still obeys executionMode and the kill switch.
+  // The one switch between practice and real money. 'paper' trades the local
+  // ledger against real books; 'live' sends real orders to the venues with a
+  // saved key, and obeys only the kill switch above it.
   mode: z.enum(['paper', 'live']),
 
   // Decision 1. 'rules' is the deterministic engine. 'agent' lets a model
@@ -85,13 +92,32 @@ export const BotSettings = z.object({
     // quarter the user picks. Overtime is the No overtime guard's.
     quarters: z.array(Quarter).min(1).default(['Q1', 'Q2', 'Q3', 'Q4']),
     labels: z.array(TradeableLabel).min(1),
-    venues: z.array(VenueId).min(1)
+    // The real venues to use among those with a saved key; none, or none
+    // with a key, means every keyed venue. 'paper' here is ignored: the mode
+    // decides paper or live (shared/venues.ts).
+    venues: z.array(VenueId).default([]),
+    // Player props only on the game's leading players (2026-11-21: "only
+    // the top 10 players in the game, not random role players"): the players
+    // ranked this high or better in their game by our points projection. Null
+    // trades every player.
+    propTopPlayers: z.number().int().min(1).max(30).nullable().default(null),
+    // Prop stats and sides this bot never buys (2026-11-24: "stop
+    // rebound unders"). Across 503 graded props, rebound unders hit 54% where
+    // we said 70% and lost $101 over 83, live and paper alike, while rebound
+    // overs made $34 over 80. Empty buys every side.
+    propSidesOff: z.array(PropSide).default([])
   }),
 
   entry: z.object({
     // Probability points, ours minus the market's. 5 means 5pp. The engine
     // also accepts a fraction and normalises (the 2026-07-23 units bug).
     minEdgePp: z.number().min(0).max(50),
+    // The other end of the edge (2026-11-23: "we have one side limit on
+    // the bands but not the other side"). Our chance minus the price paid,
+    // above which the market most likely knows something we do not: across
+    // 183 settled live bets, edges above 15 points won 9 of 23 and lost $29.94.
+    // Null is no limit. Read at the price the order would pay, on either basis.
+    maxEdgePp: z.number().min(1).max(100).nullable().default(null),
     // Net expected value per contract after fees and the haircut, in cents.
     minEvCents: z.number().min(-10).max(50),
     // Shrinks our claimed edge by the measured overconfidence before the EV
@@ -131,7 +157,33 @@ export const BotSettings = z.object({
     // The widest book to buy into (2026-11-20): the ask less the bid on the
     // side bought, in cents. null is no limit. With a limit set, a book whose
     // bid cannot be read is refused. Kalshi books only.
-    maxSpreadC: z.number().int().min(1).max(50).nullable().default(null)
+    maxSpreadC: z.number().int().min(1).max(50).nullable().default(null),
+    // When the ask is above what the play is worth (2026-11-21): 'take'
+    // skips it; 'bid' places a buy below the ask at the highest price that
+    // still clears the minimum edge, and leaves it there for bidRestS seconds
+    // in case the price comes down. Kalshi's fee on a resting order is a
+    // quarter of the taker fee. Paper fills it only when the ask reaches it.
+    // Pregame plays wait until this many minutes before the game starts
+    // (2026-11-21: "pregame rolls out 15 minutes before the game", so
+    // the pick and the price have settled). Null enters any time before the
+    // start. A combos only bot is not held to it, so an early game's leg can
+    // go early.
+    pregameWindowMin: z.number().int().min(1).max(1440).nullable().default(15),
+    // Player prop unders only at an edge inside this band, in points, read at
+    // the price the order pays (2026-11-24: "unders 5 to 7 only").
+    // Across 280 graded unders, 5 to 7 points was the one band that made
+    // money (+$15 over 90); under 5 and over 7 both lost. Overs are not held
+    // to it. The bot's own minimum and maximum edge still apply, so the band
+    // can only narrow them. Null holds unders to the bot's edges alone.
+    underEdgePp: z.tuple([z.number().min(0).max(50), z.number().min(0).max(100)]).nullable().default(null),
+    // In game prop unders only in the first this many minutes of a quarter
+    // (2026-11-24: built to test, not switched on). Live unders bought
+    // in the first 2 minutes of Q3 won 11 of 12 (+$16.70); bought 8 or more
+    // minutes in they hit 59% against our 81% and lost $22.49 over 27. A
+    // clock that cannot say how far in refuses the under. Null is no limit.
+    underFirstMin: z.number().min(1).max(15).nullable().default(null),
+    orderType: z.enum(['take', 'bid']).default('take'),
+    bidRestS: z.number().int().min(30).max(3600).default(300)
   }),
 
   size: z.object({
@@ -170,8 +222,15 @@ export const BotSettings = z.object({
   combo: z.object({
     legs: z.number().int().min(2).max(4),
     maxPerDay: z.number().int().min(1).max(50),
-    only: z.boolean()
-  }).default({ legs: 2, maxPerDay: 5, only: false }),
+    only: z.boolean(),
+    // 'built' ties the bot's own plays together; 'api' buys the API's own
+    // NBA tickets as they are (2026-11-21), with only money settings applied.
+    source: z.enum(['built', 'api']).default('built'),
+    // Which of the API's combos to buy, by their number of legs, each as the
+    // API built it (2026-11-21: "there are 3, 4 leg combos also so need
+    // options to just play those as is"). Every size, as before, by default.
+    apiLegs: z.array(z.union([z.literal(2), z.literal(3), z.literal(4)])).min(1).default([2, 3, 4])
+  }).default({ legs: 2, maxPerDay: 5, only: false, source: 'built', apiLegs: [2, 3, 4] }),
 
   guards: z.object({
     noEntryFinalS: z.number().int().min(0).max(900),
@@ -188,7 +247,17 @@ export const BotSettings = z.object({
     maxTradesPerDay: z.number().int().min(1).max(1000)
   }),
 
-  pollS: z.number().int().min(5).max(600)
+  pollS: z.number().int().min(5).max(600),
+
+  // A paper trial (2026-11-20): a paper copy of another bot running a
+  // change the AI proposed, side by side, until the user accepts or drops it.
+  // Accept copies this bot's strategy onto the original; money, name and
+  // paper or live stay the original's.
+  trial: z.object({
+    of: z.string().min(1),
+    startedAt: z.number(),
+    what: z.string().max(400)
+  }).optional()
 })
 export type BotSettings = z.infer<typeof BotSettings>
 

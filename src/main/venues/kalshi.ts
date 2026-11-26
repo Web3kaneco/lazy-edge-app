@@ -6,14 +6,17 @@
 //   2. The V2 order book trades in YES terms only. Buying NO at 30c is an ask
 //      on YES at 70c. exchange_index -1 forces routing by ticker.
 //   3. Collateral must already sit on the market's shard, or the order dies
-//      user_not_found. It is moved from shard 0 and confirmed before placing.
+//      user_not_found. It is moved from whichever shards hold it, shard 0
+//      included, and confirmed before placing (2026-11-26).
 import { constants, createPrivateKey, sign, type KeyObject } from 'node:crypto'
 import type { ContractSide } from '@shared/signal'
 import { HttpError, requestJson } from '../data/http'
 import type { TradeDecision, VenueState } from '../rules/gates'
 import { kalshiFee } from '../rules/fees'
+import { countFp } from '@shared/exits'
+import { eventMarketList } from '../data/nflkalshi'
 import { vault } from '../store/vault'
-import { DRY_RUN_RESULT, type OrderUpdate, type PlaceResult, type Quote, type SellOrder, type Venue } from './types'
+import { type OrderUpdate, type PlaceResult, type Quote, type SellOrder, type Venue } from './types'
 
 const HOSTS = {
   production: 'https://api.elections.kalshi.com',
@@ -24,6 +27,7 @@ const PREFIX = '/trade-api/v2'
 const SHARD_FUND_BUFFER_C = 200
 const SHARD_FUND_MIN_C = 100
 const BALANCE_TTL_MS = 60_000
+const CASH_HOLD_MS = 5 * 60_000
 
 type Level = [number, number]
 
@@ -63,6 +67,21 @@ export function kalshiBalance(b: Record<string, unknown>): { usd: number; equity
   const usd = dollars(b.balance_dollars, b.balance)
   if (usd === null) return null
   return { usd, equity: usd + (dollars(b.portfolio_value_dollars, b.portfolio_value) ?? 0) }
+}
+
+// Cash per shard, in cents, from GetBalanceResponse.balance_breakdown
+// ({ exchange_index, balance } with balance a dollar string). Null when the
+// reply carries no breakdown.
+export function kalshiShardCash(b: Record<string, unknown>): Map<number, number> | null {
+  const rows = b.balance_breakdown
+  if (!Array.isArray(rows)) return null
+  const out = new Map<number, number>()
+  for (const r of rows as Record<string, unknown>[]) {
+    const idx = Number(r?.exchange_index)
+    const usd = Number(r?.balance)
+    if (Number.isInteger(idx) && idx >= 0 && r?.balance !== '' && r?.balance !== null && Number.isFinite(usd)) out.set(idx, Math.round(usd * 100))
+  }
+  return out
 }
 
 const num = (v: unknown): number => (v === undefined || v === null || v === '' ? 0 : Number(v) || 0)
@@ -146,6 +165,10 @@ export class KalshiVenue implements Venue {
   private balance: { usd: number; equity: number; at: number } | null = null
   private shards = new Map<string, { idx: number | null; at: number }>()
   private shardFail = new Map<number, number>()
+  // When Kalshi last refused an order for balance. New orders wait
+  // CASH_HOLD_MS after it instead of being sent again every cycle (2026-11-21:
+  // 313 refused orders in under two hours).
+  private cashShortAt: number | null = null
 
   constructor(private readonly environment: () => 'production' | 'demo') {}
 
@@ -184,16 +207,26 @@ export class KalshiVenue implements Venue {
     return kalshiAsk(res, side)
   }
 
+  // The wait after a refusal for balance, in words, or null.
+  private hold(): string | null {
+    if (this.cashShortAt === null) return null
+    const left = this.cashShortAt + CASH_HOLD_MS - Date.now()
+    if (left <= 0) { this.cashShortAt = null; return null }
+    const at = new Date(this.cashShortAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    return `Kalshi refused an order for low balance at ${at}; new orders wait ${Math.ceil(left / 60_000)} more min`
+  }
+
   async state(): Promise<VenueState> {
     if (!this.configured()) return { balanceUsd: null, equityUsd: null }
+    const hold = this.hold()
     if (this.balance && Date.now() - this.balance.at < BALANCE_TTL_MS) {
-      return { balanceUsd: this.balance.usd, equityUsd: this.balance.equity }
+      return { balanceUsd: this.balance.usd, equityUsd: this.balance.equity, hold }
     }
     try {
       const read = kalshiBalance(await this.authed<Record<string, unknown>>('GET', '/portfolio/balance'))
       if (!read) return { balanceUsd: null, equityUsd: null }
       this.balance = { ...read, at: Date.now() }
-      return { balanceUsd: read.usd, equityUsd: read.equity }
+      return { balanceUsd: read.usd, equityUsd: read.equity, hold }
     } catch {
       return { balanceUsd: null, equityUsd: null }
     }
@@ -221,31 +254,67 @@ export class KalshiVenue implements Venue {
     }
   }
 
-  // ensure_shard_funded, fail closed on every doubt. Shard 0 or unknown is
-  // allowed through: 0 is where cash lives, and unknown means auto routing
-  // decides (blocking on a lookup hiccup was the 08-27 lesson inverted).
-  private async ensureShardFunded(shard: number | null, needC: number): Promise<string | null> {
-    if (shard === null || shard === 0) return null
-    const lastFail = this.shardFail.get(shard)
-    if (lastFail && Date.now() - lastFail < 600_000) return `shard ${shard} funding failed recently`
-    const fail = (why: string): string => { this.shardFail.set(shard, Date.now()); return why }
-
-    const have = await this.shardBalanceC(shard)
-    if (have === null) return fail(`shard ${shard} balance unreadable`)
-    if (have >= needC) return null
-    const src = await this.shardBalanceC(0)
-    if (src === null || src < needC - have) return fail(`shard ${shard} needs ${needC.toFixed(0)}c, shard 0 has ${src ?? 0}c`)
-    const amount = Math.floor(Math.min(Math.max(SHARD_FUND_MIN_C, needC - have + SHARD_FUND_BUFFER_C), src))
+  // The cash on every shard, in cents, from one balance read: Kalshi's
+  // balance_breakdown lists each exchange index, zero balances included. Null
+  // when the reply has no breakdown (a key limited to a subaccount).
+  private async shardCash(): Promise<Map<number, number> | null> {
     try {
-      await this.authed('POST', '/portfolio/intra_exchange_instance_transfer', {
-        amount: amount * 100, // the endpoint takes centicents ($1 = 10,000)
-        source_exchange_shard: 0,
-        destination_exchange_shard: shard,
-        source: 'event_contract',
-        destination: 'event_contract'
-      })
-    } catch (err) {
-      return fail(`shard transfer failed: ${(err as Error).message}`)
+      return kalshiShardCash(await this.authed<Record<string, unknown>>('GET', '/portfolio/balance'))
+    } catch {
+      return null
+    }
+  }
+
+  // ensure_shard_funded. Cash moves to the market's shard from whichever
+  // shards hold it, shard 0 included as a destination (2026-11-26: NFL markets
+  // sit on shard 0 and NBA markets on shard 3; cash was only ever moved out of
+  // 0, so once it and the NBA payouts sat on 3, every NFL order from 23
+  // November was refused for balance). An unknown shard is allowed through,
+  // since auto routing decides (blocking on a lookup hiccup was the 08-27
+  // lesson inverted). Shard 0 with no cash found anywhere is allowed through
+  // too, so Kalshi's own refusal starts the low balance wait; any other shard
+  // fails closed on every doubt.
+  private async ensureShardFunded(shard: number | null, needC: number): Promise<string | null> {
+    if (shard === null) return null
+    const lastFail = this.shardFail.get(shard)
+    if (lastFail && Date.now() - lastFail < 600_000) return shard === 0 ? null : `shard ${shard} funding failed recently`
+    const fail = (why: string): string | null => { this.shardFail.set(shard, Date.now()); return shard === 0 ? null : why }
+
+    // Every shard's cash from one read; without the breakdown, the target and
+    // the other shards seen on markets, one read each.
+    let cash = await this.shardCash()
+    if (!cash) {
+      cash = new Map()
+      const seen = new Set<number>([0, shard])
+      for (const s of this.shards.values()) if (s.idx !== null) seen.add(s.idx)
+      for (const s of seen) { const c = await this.shardBalanceC(s); if (c !== null) cash.set(s, c) }
+    }
+    const have = cash.get(shard)
+    if (have === undefined) return fail(`shard ${shard} balance unreadable`)
+    if (have >= needC) return null
+    const short = needC - have
+    const sources = [...cash.entries()].filter(([s, c]) => s !== shard && c > 0).sort((a, b) => b[1] - a[1])
+    const spare = sources.reduce((n, [, c]) => n + c, 0)
+    if (spare < short) return fail(`shard ${shard} needs ${needC.toFixed(0)}c, has ${have}c, the other shards ${spare}c`)
+    // Largest first, as many shards as it takes, with the buffer on top when
+    // there is room for it.
+    let want = Math.floor(Math.min(Math.max(SHARD_FUND_MIN_C, short + SHARD_FUND_BUFFER_C), spare))
+    for (const [src, c] of sources) {
+      if (want <= 0) break
+      const amount = Math.floor(Math.min(want, c))
+      if (amount <= 0) continue
+      try {
+        await this.authed('POST', '/portfolio/intra_exchange_instance_transfer', {
+          amount: amount * 100, // the endpoint takes centicents ($1 = 10,000)
+          source_exchange_shard: src,
+          destination_exchange_shard: shard,
+          source: 'event_contract',
+          destination: 'event_contract'
+        })
+      } catch (err) {
+        return fail(`shard transfer ${src} to ${shard} failed: ${(err as Error).message}`)
+      }
+      want -= amount
     }
     // Cross shard transfers are documented non atomic; confirm it landed.
     for (let i = 0; i < 4; i++) {
@@ -257,13 +326,16 @@ export class KalshiVenue implements Venue {
   }
 
   async place(order: TradeDecision): Promise<PlaceResult> {
-    if (order.dryRun) return DRY_RUN_RESULT(order)
     const reject = (error: string): PlaceResult => ({
       ok: false, venueOrderId: null, status: 'rejected', filledContracts: 0, avgFillC: null, feeUsd: 0, error
     })
 
-    // Collateral first. YES ties up the price, NO the complement; +5% for fees.
-    const tieC = order.side === 'yes' ? order.limitPriceC : 100 - order.limitPriceC
+    // Collateral first: the price of the side bought, +5% for fees. The limit
+    // is already in our side's terms (a NO bought at 79c ties up 79c). It was
+    // once worked out as the complement for NO, so a 79c under moved only 21c
+    // a contract to the shard and Kalshi refused it for balance while the
+    // cash sat on shard 0 (2026-11-21: "there was enough money in the 3rd").
+    const tieC = order.limitPriceC
     const shardProblem = await this.ensureShardFunded(await this.shardOf(order.contract), order.contracts * tieC * 1.05)
     if (shardProblem) return reject(`shard_funding_failed: ${shardProblem}`)
 
@@ -272,7 +344,7 @@ export class KalshiVenue implements Venue {
       const res = await this.authed<Record<string, any>>('POST', '/portfolio/events/orders', {
         ticker: order.contract,
         side: order.side === 'yes' ? 'bid' : 'ask',
-        count: `${order.contracts}.00`,
+        count: countFp(order.contracts),
         price: (yesPriceC / 100).toFixed(2),
         time_in_force: 'good_till_canceled',
         self_trade_prevention_type: 'taker_at_cross',
@@ -283,7 +355,9 @@ export class KalshiVenue implements Venue {
       this.balance = null
       return { ok: true, ...kalshiPlaced(res, order.side, order.contracts), venueOrderId: String(res.order_id ?? '') || null, error: null }
     } catch (err) {
-      return reject((err as Error).message)
+      const msg = (err as Error).message
+      if (/insufficient_balance/.test(msg)) { this.cashShortAt = Date.now(); this.balance = null }
+      return reject(msg)
     }
   }
 
@@ -299,7 +373,7 @@ export class KalshiVenue implements Venue {
       const res = await this.authed<Record<string, any>>('POST', '/portfolio/events/orders', {
         ticker: order.contract,
         side: order.side === 'yes' ? 'ask' : 'bid',
-        count: `${order.contracts}.00`,
+        count: countFp(order.contracts),
         price: (yesPriceC / 100).toFixed(2),
         time_in_force: order.timeInForce === 'ioc' ? 'immediate_or_cancel' : 'good_till_canceled',
         ...(order.timeInForce === 'ioc' ? { reduce_only: true } : {}),
@@ -319,12 +393,58 @@ export class KalshiVenue implements Venue {
   // A combo is its own market, created from its legs, priced by request for
   // quote. Every call here is Kalshi's documented API (internal/combos.md).
 
+  // One event's markets, a public read, kept ten minutes: the NFL slip
+  // mapping reads each game's prop ladders from here (2026-11-21). Null when
+  // Kalshi has no such event.
+  private eventCache = new Map<string, { at: number; markets: unknown[] | null }>()
+  async eventMarkets(eventTicker: string): Promise<unknown[] | null> {
+    const kept = this.eventCache.get(eventTicker)
+    if (kept && Date.now() - kept.at < 600_000) return kept.markets
+    let markets: unknown[] | null = null
+    try {
+      const res = await requestJson<{ markets?: unknown[]; event?: { markets?: unknown[] } }>(`${this.host}${PREFIX}/events/${encodeURIComponent(eventTicker)}?with_nested_markets=true`)
+      markets = eventMarketList(res)
+    } catch { markets = null }
+    this.eventCache.set(eventTicker, { at: Date.now(), markets })
+    return markets
+  }
+
+  // Every open market in a series, such as KXNFLGAME, for matching a game to
+  // its markets (data/nflkalshi.ts). Public read, kept ten minutes. A failed
+  // read gives null, so a game stays unmatched rather than matched to a list
+  // that is missing part of the slate.
+  private seriesCache = new Map<string, { at: number; markets: { ticker: string; event_ticker: string; expected_expiration_time?: string | null }[] | null }>()
+  async openSeriesMarkets(series: string): Promise<{ ticker: string; event_ticker: string; expected_expiration_time?: string | null }[] | null> {
+    const kept = this.seriesCache.get(series)
+    if (kept && Date.now() - kept.at < 600_000) return kept.markets
+    let markets: { ticker: string; event_ticker: string; expected_expiration_time?: string | null }[] | null = []
+    try {
+      let cursor = ''
+      for (let page = 0; page < 10; page++) {
+        const res = await requestJson<{ markets?: any[]; cursor?: string }>(`${this.host}${PREFIX}/markets?series_ticker=${encodeURIComponent(series)}&status=open&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
+        for (const m of res.markets ?? []) if (m?.ticker && m?.event_ticker) markets.push({ ticker: String(m.ticker), event_ticker: String(m.event_ticker), expected_expiration_time: m.expected_expiration_time ?? null })
+        cursor = res.cursor ?? ''
+        if (!cursor) break
+      }
+    } catch { markets = null }
+    this.seriesCache.set(series, { at: Date.now(), markets })
+    return markets
+  }
+
   private collections: { at: number; list: { ticker: string; events: Set<string> }[] } | null = null
 
-  // The open combo collection that holds every leg's event. Public read.
-  async comboCollection(eventTickers: string[]): Promise<string | null> {
-    if (!this.collections || Date.now() - this.collections.at > 600_000) {
-      const res = await requestJson<{ multivariate_contracts?: Record<string, any>[] }>(`${this.host}${PREFIX}/multivariate_event_collections?status=open&limit=200`)
+  // The open combo collection that holds every leg, with each leg's event as
+  // Kalshi lists it. A leg's event is the longest front part of its ticker
+  // that a combo list names: KXNBAGAME-26NOV23MEMCHA-MEM is in
+  // KXNBAGAME-26NOV23MEMCHA, and a player prop such as
+  // KXNFLREC-26NOV23CINWAS-WASCOKONKWO85-5 is in KXNFLREC-26NOV23CINWAS, not in
+  // a player event (2026-11-23: dropping only the last part sent every player
+  // prop combo to an event that does not exist, so none could be priced).
+  // A list that holds none is read once more before giving up, and the answer
+  // names the legs no list holds.
+  async comboCollection(contracts: string[]): Promise<{ ticker: string; events: string[] } | { missing: string[] }> {
+    const read = async (): Promise<void> => {
+      const res = await requestJson<{ multivariate_contracts?: Record<string, any>[] }>(`${this.host}${PREFIX}/multivariate_event_collections?status=open&limit=200`, { timeoutMs: 30_000 })
       this.collections = {
         at: Date.now(),
         list: (res.multivariate_contracts ?? []).map((c) => ({
@@ -333,7 +453,20 @@ export class KalshiVenue implements Venue {
         })).filter((c) => c.ticker)
       }
     }
-    return this.collections.list.find((c) => eventTickers.every((e) => c.events.has(e)))?.ticker ?? null
+    const find = (): { ticker: string; events: string[] } | null => {
+      for (const c of this.collections?.list ?? []) {
+        const events = contracts.map((k) => comboEventOf(k, c.events))
+        if (events.every((e): e is string => e !== null)) return { ticker: c.ticker, events }
+      }
+      return null
+    }
+    if (!this.collections || Date.now() - this.collections.at > 600_000) await read()
+    let found = find()
+    if (!found && Date.now() - this.collections!.at > 60_000) { await read(); found = find() }
+    if (found) return found
+    const held = new Set(this.collections!.list.flatMap((c) => [...c.events]))
+    const missing = [...new Set(contracts.filter((k) => comboEventOf(k, held) === null))].map((k) => `${k} is in no combo list`)
+    return { missing: missing.length ? missing : [`no one combo list holds ${contracts.join(' and ')}`] }
   }
 
   // Creates the combo market for these legs, or returns the one that exists.
@@ -357,9 +490,12 @@ export class KalshiVenue implements Venue {
     return String(res.id)
   }
 
-  // Open quotes answering this request, in cents, best price first.
+  // Open quotes answering this request, in cents, best price first. Kalshi
+  // refuses a quote list that names no requester (2026-11-23, HTTP 403
+  // "Either creator_user_id or rfq_creator_user_id must be filled"), so it
+  // asks for quotes on this user's own requests, as Kalshi's docs set out.
   async rfqQuotes(rfqId: string): Promise<{ id: string; yesBidC: number; noBidC: number; contracts: number }[]> {
-    const res = await this.authed<{ quotes?: Record<string, any>[] }>('GET', '/communications/quotes', undefined, `?rfq_id=${encodeURIComponent(rfqId)}&status=open&limit=100`)
+    const res = await this.authed<{ quotes?: Record<string, any>[] }>('GET', '/communications/quotes', undefined, `?rfq_id=${encodeURIComponent(rfqId)}&rfq_user_filter=self&status=open&limit=100`)
     return (res.quotes ?? []).map((q) => ({
       id: String(q.id ?? ''),
       yesBidC: Math.round(Number(q.yes_bid_dollars) * 10000) / 100,
@@ -489,4 +625,15 @@ export class KalshiVenue implements Venue {
       return { ok: false, detail: `Could not reach Kalshi (${env}): ${(err as Error).message}` }
     }
   }
+}
+
+// The event a market belongs to, among the events a combo list names: the
+// longest front part of the ticker that the list holds, or null.
+export function comboEventOf(contract: string, events: Set<string>): string | null {
+  const parts = contract.split('-')
+  for (let n = parts.length - 1; n >= 2; n--) {
+    const e = parts.slice(0, n).join('-')
+    if (events.has(e)) return e
+  }
+  return null
 }

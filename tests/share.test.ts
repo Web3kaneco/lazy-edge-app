@@ -9,7 +9,8 @@ describe('starter bots', () => {
     for (const b of bots) {
       expect(BotSettings.safeParse(b).success, b.name).toBe(true)
       expect(b).toMatchObject({ enabled: false, mode: 'paper', decider: { kind: 'rules' } })
-      expect(b.market.venues).toEqual(['paper'])
+      // No venue named: the bot uses whichever venues have a key.
+      expect(b.market.venues).toEqual([])
       expect(b.entry.priceBandC[0]).toBeLessThanOrEqual(b.entry.priceBandC[1])
       expect(starterOf(b.id)?.name).toBe(b.name)
     }

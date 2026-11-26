@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import { api, usd, type Ticket } from '../api'
 import { PlayActions } from './Report'
+import { trailWords } from '@shared/trail'
 
 export function Ledger({ onReport }: { onReport: (ticketId: string) => void }) {
   const [days, setDays] = useState(7)
@@ -52,6 +53,7 @@ export function Ledger({ onReport }: { onReport: (ticketId: string) => void }) {
                     <td colSpan={11} className="small">
                       <div className="mono muted">{t.contract}</div>
                       {t.why && <div>{t.why}</div>}
+                      {trailWords(t.play?.trail) && <div className="muted">Just before: {trailWords(t.play?.trail)}</div>}
                       <ul style={{ margin: '6px 0' }}>{t.audit.map((a, i) => <li key={i} className="muted">{a}</li>)}</ul>
                       {t.error && <div className="err">{t.error}</div>}
                       <div className="muted">fee {usd(t.feeUsd)}</div>

@@ -4,7 +4,8 @@ import { BOOK_EVIDENCE, checkSettlement, classifyFill, summarize, type CheckedTi
 import { analyze, MIN_SETTLED, tagsOf, type SettledLike } from '../src/shared/results'
 import { orderFee } from '../src/main/rules/fees'
 import { paperFill } from '../src/main/venues/paper'
-import { GLOSSARY, tip } from '../src/renderer/src/glossary'
+import { GLOSSARY, labelName, tip } from '../src/renderer/src/glossary'
+import { NEVER_TRADE_LABELS, TradeableLabel } from '../src/shared/schema'
 
 describe('paper fills against the live book', () => {
   const order = { contracts: 26, limitPriceC: 48, priceSource: 'kalshi' as const }
@@ -153,6 +154,16 @@ describe('glossary', () => {
     const labels = ['PRICE_GAP', 'RATING_Q', 'LEAN', 'TAIL_RUNG', 'ROLE_Q', 'MEASURED']
     for (const term of [...used, ...lanes, ...labels]) expect(tip(term), term).not.toBe('')
     expect(used.length).toBeGreaterThan(20)
+  })
+
+  it('shows every label by a plain name, and the tip still names its code', () => {
+    for (const code of [...TradeableLabel.options, ...NEVER_TRADE_LABELS]) {
+      expect(labelName(code), code).not.toBe(code)
+      expect(labelName(code)).not.toMatch(/_/)
+    }
+    for (const code of TradeableLabel.options) expect(tip(code), code).toContain(`Code ${code}.`)
+    expect(labelName('price_gap')).toBe('Priced under our number')
+    expect(labelName('SOMETHING_NEW')).toBe('SOMETHING_NEW')
   })
 
   it('has no duplicate terms', () => {

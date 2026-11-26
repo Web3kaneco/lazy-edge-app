@@ -2,9 +2,12 @@
 // Results screen and the tests read the same numbers.
 //
 // A segment is only called a winner or a loser when its record is unlikely to
-// be luck: the win rate is compared with the average price paid, which is the
-// win rate a fair coin at those prices would produce, and the gap is measured
-// in standard errors. Small samples are reported, never recommended on. The
+// be luck: the win rate is compared with breakeven, the average price paid
+// plus the fee a contract, which is the win rate a fair coin at those prices
+// would produce after fees, and the gap is measured in standard errors. Both
+// count each trade once (2026-11-24: breakeven was once weighted by contracts
+// and left the fee out, so flat sizing, which buys more contracts on cheap
+// plays, showed it 5 points under the win rate it sat beside). Small samples are reported, never recommended on. The
 // Lazy Edge sim found 19 of 3,297 situations clear a bar, fewer than chance
 // alone would produce, which is the mistake this guards against.
 //
@@ -43,9 +46,11 @@ export interface Segment {
   contracts: number
   pnlUsd: number
   costUsd: number
-  // Average price paid, 0 to 1: the win rate at which this segment breaks even
-  // before fees.
+  // Average price paid a trade, 0 to 1, before fees.
   avgPrice: number
+  // The win rate this segment needs to break even: the average price paid a
+  // trade plus the fee Kalshi charged a contract.
+  breakeven: number
   winRate: number
   pnlPerContractC: number
   roi: number
@@ -100,25 +105,27 @@ const bucket = (v: number | null | undefined, table: [number, number, string][])
 
 const priceC = (t: SettledLike): number => t.avgFillC ?? t.limitPriceC
 
-function segment(key: string, ts: SettledLike[]): Segment {
+export function segment(key: string, ts: SettledLike[]): Segment {
   const won = ts.filter((t) => (t.pnlUsd ?? 0) > 0).length
   const contracts = ts.reduce((s, t) => s + t.filledContracts, 0)
   const pnlUsd = ts.reduce((s, t) => s + (t.pnlUsd ?? 0), 0)
   const costUsd = ts.reduce((s, t) => s + t.filledContracts * priceC(t) / 100, 0)
-  const avgPrice = contracts ? ts.reduce((s, t) => s + t.filledContracts * priceC(t), 0) / contracts / 100 : 0
   const n = ts.length
+  const avgPrice = n ? ts.reduce((s, t) => s + priceC(t), 0) / n / 100 : 0
+  const evenAt = (t: SettledLike): number => priceC(t) / 100 + (t.filledContracts > 0 ? (t.feeUsd || 0) / t.filledContracts : 0)
+  const breakeven = n ? ts.reduce((s, t) => s + evenAt(t), 0) / n : 0
   const winRate = n ? won / n : 0
   // Per game sums of (won - price paid): a game's rungs count as one draw.
   const byGame = new Map<string, number>()
-  for (const t of ts) byGame.set(gameOf(t), (byGame.get(gameOf(t)) ?? 0) + ((t.pnlUsd ?? 0) > 0 ? 1 : 0) - priceC(t) / 100)
+  for (const t of ts) byGame.set(gameOf(t), (byGame.get(gameOf(t)) ?? 0) + ((t.pnlUsd ?? 0) > 0 ? 1 : 0) - evenAt(t))
   const games = byGame.size
-  const independent = Math.sqrt(Math.max(avgPrice * (1 - avgPrice), 0.01) / Math.max(n, 1))
+  const independent = Math.sqrt(Math.max(breakeven * (1 - breakeven), 0.01) / Math.max(n, 1))
   const clustered = Math.sqrt([...byGame.values()].reduce((s, r) => s + r * r, 0)) / Math.max(n, 1)
   const se = Math.max(independent, clustered)
-  const z = n ? (winRate - avgPrice) / se : 0
+  const z = n ? (winRate - breakeven) / se : 0
   const verdict = n < MIN_SETTLED || games < MIN_GAMES ? 'too_early' : z >= 2 && pnlUsd > 0 ? 'winning' : z <= -2 && pnlUsd < 0 ? 'losing' : 'even'
   return {
-    key, n, games, won, lost: n - won, contracts, pnlUsd, costUsd, avgPrice, winRate,
+    key, n, games, won, lost: n - won, contracts, pnlUsd, costUsd, avgPrice, breakeven, winRate,
     pnlPerContractC: contracts ? (pnlUsd / contracts) * 100 : 0,
     roi: costUsd ? pnlUsd / costUsd : 0,
     z, verdict,
@@ -163,11 +170,42 @@ export function fixFor(dimension: string, key: string): Fix | undefined {
       if (key === SCORE_BUCKETS.down) return { kind: 'maxTrailing', points: 0 }
       return undefined
     case 'favorite': return key === 'Underdog' ? { kind: 'favoritesOnly' } : undefined
+    // Keeping out of a game's last minutes cuts this bucket and every later one.
+    case 'timeLeft': { const b = TIME_LEFT.find(([, k]) => k === key); return b && b[2] > 0 ? { kind: 'finalSeconds', s: b[2] } : undefined }
+    // Raising the minimum chance to the top of a band cuts that band and the
+    // ones under it.
+    case 'chance': { const m = /^(\d+) to (\d+)%$/.exec(key); return m ? { kind: 'minChance', when: 'all', pct: Math.min(99, Number(m[2])) } : undefined }
+    // Keeping props to the players above a losing band cuts that band and
+    // every one below it.
+    case 'propRank': { const b = RANK_BUCKETS.find(([, k]) => k === key); return b && b[2] > 0 ? { kind: 'propTop', n: b[2] } : undefined }
+    case 'quarterChance': {
+      const m = /^(Pregame|Q[1-4]) at (\d+) to (\d+)%$/.exec(key)
+      return m ? { kind: 'minChance', when: m[1] === 'Pregame' ? 'pregame' : m[1] as 'Q1' | 'Q2' | 'Q3' | 'Q4', pct: Math.min(99, Number(m[3])) } : undefined
+    }
     default: return undefined
   }
 }
 
-const DIMENSIONS: { id: string; title: string; setting: string | null; of: (t: SettledLike) => string | null }[] = [
+// Where in the game a live play was bought, by minutes left in the game.
+const TIME_LEFT: [number, string, number][] = [[120, 'Last 2 minutes', 120], [300, '2 to 5 minutes left', 300], [720, '5 to 12 minutes left', 720], [Infinity, 'More than 12 minutes left', 0]]
+const timeLeftBucket = (s: number | null | undefined): string | null => (s === null || s === undefined ? null : TIME_LEFT.find(([hi]) => s < hi)![1])
+const CHANCE_BANDS: [number, number][] = [[50, 60], [60, 70], [70, 80], [80, 90], [90, 100]]
+const chanceBand = (p: number | null | undefined): [number, number] | null => (p === null || p === undefined ? null : CHANCE_BANDS.find(([lo, hi]) => p * 100 >= lo && p * 100 < hi) ?? null)
+
+// How far a prop was from its line when bought: what an over still needed,
+// or what an under had to spare.
+function propNeed(t: SettledLike): string | null {
+  const g = tagsOf(t)
+  if (g.propLine == null || g.propSoFar == null || g.propOver == null) return null
+  const gap = g.propLine - g.propSoFar
+  if (g.propOver) return gap <= 2.5 ? 'Over, needed 2 or fewer more' : gap <= 5.5 ? 'Over, needed 3 to 5 more' : 'Over, needed 6 or more'
+  return gap >= 5.5 ? 'Under, 6 or more to spare' : gap >= 2.5 ? 'Under, 3 to 5 to spare' : 'Under, 2 or fewer to spare'
+}
+
+// A player's place in his game by our points projection.
+const RANK_BUCKETS: [number, string, number][] = [[3, 'Top 3 in the game', 0], [6, '4th to 6th', 3], [10, '7th to 10th', 6], [Infinity, '11th or lower', 10]]
+
+export const DIMENSIONS: { id: string; title: string; setting: string | null; of: (t: SettledLike) => string | null }[] = [
   { id: 'bot', title: 'Bot', setting: null, of: (t) => t.botName },
   { id: 'sport', title: 'Sport', setting: 'Sports', of: (t) => tagsOf(t).sport ?? null },
   { id: 'lane', title: 'Lane', setting: 'Lanes', of: (t) => tagsOf(t).lane ?? null },
@@ -181,7 +219,24 @@ const DIMENSIONS: { id: string; title: string; setting: string | null; of: (t: S
   // Live quarters only: pregame is already its own row under Live or pregame.
   { id: 'quarter', title: 'Quarter bought in', setting: 'Quarters', of: (t) => { const q = tagsOf(t).quarter; return q && q !== 'Pregame' ? q : null } },
   { id: 'score', title: 'Score when bought', setting: 'Most points behind', of: (t) => scoreBucket(tagsOf(t).lead) },
-  { id: 'favorite', title: 'Favorite or underdog', setting: 'Favorites only', of: (t) => { const p = tagsOf(t).teamWinP; return p === null || p === undefined ? null : p >= 0.5 ? 'Favorite' : 'Underdog' } }
+  { id: 'favorite', title: 'Favorite or underdog', setting: 'Favorites only', of: (t) => { const p = tagsOf(t).teamWinP; return p === null || p === undefined ? null : p >= 0.5 ? 'Favorite' : 'Underdog' } },
+  // From 0.9.2, our pick in play: did it change at the tip (API #981)?
+  { id: 'pickChanged', title: 'Our pick at the tip', setting: null, of: (t) => { const c = tagsOf(t).pickChanged; return c === null || c === undefined ? null : c ? 'Changed at the tip' : 'Same as pregame' } },
+  // From 0.9.2, where the play was (2026-11-21).
+  { id: 'timeLeft', title: 'Time left in the game', setting: 'No entry in the final', of: (t) => timeLeftBucket(tagsOf(t).secondsLeft) },
+  { id: 'chance', title: 'Our chance when bought', setting: 'Minimum chance to hit', of: (t) => { const b = chanceBand(tagsOf(t).ourP); return b ? `${b[0]} to ${b[1]}%` : null } },
+  // The same chance band in one quarter against another: what a quarter's
+  // minimum chance should be.
+  { id: 'quarterChance', title: 'Quarter and chance', setting: 'Minimum chance to hit', of: (t) => {
+    const g = tagsOf(t)
+    const b = chanceBand(g.ourP)
+    const q = g.quarter && g.quarter !== 'OT' ? g.quarter : null
+    return b && q ? `${q === 'Pregame' ? 'Pregame' : q} at ${b[0]} to ${b[1]}%` : null
+  } },
+  { id: 'propSide', title: 'Prop over or under', setting: null, of: (t) => { const o = tagsOf(t).propOver; return o === null || o === undefined ? null : o ? 'Over' : 'Under' } },
+  { id: 'propNeed', title: 'How far from the line', setting: null, of: propNeed },
+  { id: 'propTeamScore', title: "Player's team score", setting: null, of: (t) => scoreBucket(tagsOf(t).propTeamLead) },
+  { id: 'propRank', title: "Player's place in the game", setting: "Props on the game's top players only", of: (t) => { const r = tagsOf(t).propRank; return r == null ? null : RANK_BUCKETS.find(([hi]) => r <= hi)![1] } }
 ]
 
 export function settled<T extends SettledLike>(tickets: T[]): T[] {

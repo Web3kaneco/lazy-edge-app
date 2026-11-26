@@ -4,7 +4,7 @@ import { dayOptions, type DayTicket } from '../src/shared/dayreport'
 import { defaultBot } from '../src/shared/ruleset'
 import { changesFromDefaults, shareCode } from '../src/shared/share'
 
-const app: ReportInput['app'] = { version: '0.2.0-beta.3', os: 'Windows 10.0.26300 x64', engineRunning: true, executionMode: 'dry_run', killSwitch: false, lastError: null }
+const app: ReportInput['app'] = { version: '0.2.0-beta.3', os: 'Windows 10.0.26300 x64', engineRunning: true, liveBots: 0, killSwitch: false, lastError: null }
 const play: NonNullable<ReportInput['play']> = {
   id: 't1', title: 'SEA -3.5', botName: 'Hot plays', venue: 'paper', priceSource: 'kalshi', contract: 'KXNFLSPREAD-X', side: 'yes',
   contracts: 10, filledContracts: 10, limitPriceC: 45, avgFillC: 45, costUsd: 4.5, feeUsd: 0.18, evCents: 8.3, status: 'settled',

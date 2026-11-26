@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import type { BotVerdict, Signal } from '@shared/signal'
+import { playRisk, playRiskLine, playRiskShort } from '@shared/risk'
 import { useBoard, type EngineState } from '../api'
-import { GATES, tip } from '../glossary'
+import { GATES, labelName, tip } from '../glossary'
 import { Tip } from '../ui'
 
 type Show = 'tradeable' | 'taking' | 'all'
@@ -163,15 +164,20 @@ function Play({ s, game, verdicts, info }: { s: Signal; game: string; verdicts: 
   const strip = (t: string, prefix: string | null | undefined): string => (prefix && t.startsWith(prefix) ? t.slice(prefix.length).trim() || t : t)
   const title = strip(strip(s.title, s.matchup), game)
   const ask = bestAsk(s)
+  const lowered = s.rawP != null && s.ourP !== null && s.rawP > s.ourP
+  // Risk and reward at the price that can be paid, on the honest chance.
+  const risk = ask !== null && s.ourP !== null && !info ? playRisk(s.ourP, Math.round(ask * 100)) : null
   return (
     <div className="play">
       <div>
         <div className="title">{title}</div>
         {s.why && <div className="why">{s.why}</div>}
+        {lowered && <div className="why warn">Honest chance {pct(s.ourP)}, not our {pct(s.rawP ?? null)}: {(s.honestNotes ?? []).join('; ')}.</div>}
+        {risk && <div className={`why small ${risk.evC < 0 ? 'bad' : 'muted'} has-tip`} data-tip={playRiskLine(risk)}>{playRiskShort(risk)}</div>}
         <div className="tags">
           {s.hot && <span className="pill hot has-tip" data-tip={tip('Hot play')}>Hot</span>}
           <span className="pill lane has-tip" data-tip={tip(s.lane)}>{s.lane}</span>
-          <span className="pill has-tip" data-tip={tip(s.label) || undefined}>{s.label}</span>
+          <span className="pill has-tip" data-tip={tip(s.label) || undefined}>{labelName(s.label)}</span>
           <span className="pill">{s.phase}</span>
         </div>
         {!info && (
@@ -180,7 +186,7 @@ function Play({ s, game, verdicts, info }: { s: Signal; game: string; verdicts: 
           </div>
         )}
       </div>
-      <div className="n"><small>Ours</small>{pct(s.ourP)}</div>
+      <div className="n"><small>{lowered ? 'Honest' : 'Ours'}<Tip text="The chance every bot check reads. It starts as our number and is only ever lowered: by how often teams in the same spot really came back, and by how your own plays like it have done. The edge is measured on it." /></small>{pct(s.ourP)}{lowered && <span className="small muted" style={{ display: 'block', fontSize: 11 }}>ours {pct(s.rawP ?? null)}</span>}</div>
       <div className="n"><small>{ask !== null ? 'Ask' : 'Market'}</small>{ask !== null ? `${Math.round(ask * 100)}c` : pct(s.marketP)}</div>
       <div className="n"><small>Edge<Tip text={tip('Edge (pp)')} /></small>{s.edgePp === null ? '—' : `${s.edgePp.toFixed(1)}pp`}</div>
     </div>

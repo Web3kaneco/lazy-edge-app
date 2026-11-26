@@ -131,7 +131,7 @@ export function Report({ ticketId, startKind }: { ticketId: string | null; start
     kind, note, at: Date.now(),
     app: {
       version: __APP_VERSION__, os: ctx.os, engineRunning: Boolean(engine?.running),
-      executionMode: account?.executionMode ?? 'dry_run', killSwitch: Boolean(account?.killSwitch), lastError: engine?.lastError ?? null
+      liveBots: engine?.limits.liveBots ?? 0, killSwitch: Boolean(account?.killSwitch), lastError: engine?.lastError ?? null
     },
     play: kind !== 'day' && play ? play : undefined,
     review: kind !== 'day' && play ? review : null,

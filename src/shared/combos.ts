@@ -37,8 +37,56 @@ export interface ComboPick {
   source: 'legs_multiplied' | 'lazy_edge'
 }
 
-// Kalshi names an event by the ticker without its last segment:
-// KXNBAPTS-99JAN01AAABBB-AAAPONE-25 belongs to KXNBAPTS-99JAN01AAABBB-AAAPONE.
+// The API's NBA tickets as combos to buy (agent guide, NBA tickets): each
+// ticket's picks with their Kalshi ticker, our chance and the ask, our chance
+// every leg wins (p_all) and the prices multiplied (market_p_all). Only a
+// ticket that has locked, 20 minutes before the night's first tip, so it no
+// longer changes, and only while none of its games has tipped. A pick without
+// a ticker or a price, or two picks on one game, makes the ticket unusable.
+//
+// From 25 November the API's tickets can carry player props. the owner chose
+// straight props only (24 November), and a prop leg and its own team's win
+// on one game slipped past the one game check, which compared whole market
+// names. A ticket with any pick that is not a game winner is skipped, and
+// one game is now told by the game code every NBA ticker shares.
+export function apiTicketPicks(body: unknown, now: number): ComboPick[] {
+  const b = body as any
+  const tickets: any[] = Array.isArray(b) ? b : Array.isArray(b?.tickets) ? b.tickets : []
+  const out: ComboPick[] = []
+  for (const t of tickets) {
+    if (!(t?.locked ?? b?.locked)) continue
+    const picks: any[] = Array.isArray(t?.picks) ? t.picks : []
+    if (picks.length < 2) continue
+    const legs: ComboLeg[] = []
+    for (const p of picks) {
+      const ticker = typeof p?.ticker === 'string' ? p.ticker : ''
+      const ourP = typeof p?.our_prob === 'number' ? p.our_prob : NaN
+      const price = typeof p?.price === 'number' ? p.price : NaN
+      const tip = p?.tip ? Date.parse(String(p.tip)) : NaN
+      if (!ticker || !(ourP > 0 && ourP < 1) || !(price > 0 && price < 1)) break
+      if (!/^KXNBAGAME-/i.test(ticker)) break
+      if (Number.isFinite(tip) && tip <= now) break
+      if (legs.some((l) => gameCodeOf(l.contract) === gameCodeOf(ticker))) break
+      legs.push({ signalKey: `nba-ticket:${ticker}`, gameId: eventOf(ticker), title: `${p.team ?? ticker}${p.opp ? ` over ${p.opp}` : ''}`, contract: ticker, side: 'yes', ourP, askC: Math.round(price * 100), edgePp: (ourP - price) * 100 })
+    }
+    if (legs.length !== picks.length) continue
+    const chance = typeof t.p_all === 'number' ? t.p_all : legs.reduce((x, l) => x * l.ourP, 1)
+    const market = typeof t.market_p_all === 'number' ? t.market_p_all : legs.reduce((x, l) => x * (l.askC / 100), 1)
+    out.push({ legs, chance, legsPriceC: Math.round(market * 10000) / 100, source: 'lazy_edge' })
+  }
+  return out
+}
+
+// The game a Kalshi NBA ticker belongs to, the same for its winner, spread,
+// total and every player prop: 26NOV24BOSWAS in KXNBAREB-26NOV24BOSWAS-BOSJTATUM0-6.
+export function gameCodeOf(ticker: string): string {
+  return (ticker.split('-')[1] ?? ticker).toUpperCase()
+}
+
+// The ticker without its last segment: right for game markets
+// (KXNBAGAME-26NOV23MEMCHA-MEM), not for player props, whose event is one
+// segment shorter again. Used here only to keep two legs from one market;
+// the event sent to Kalshi comes from its combo list (comboEventOf).
 export function eventOf(contract: string): string {
   const parts = contract.split('-')
   return parts.length > 2 ? parts.slice(0, -1).join('-') : contract
@@ -114,6 +162,16 @@ export function bestQuote<Q extends { yesBidC: number; noBidC: number }>(quotes:
     if (price.buyYesC !== null && (!best || price.buyYesC < best.price.buyYesC!)) best = { quote: q, price }
   }
   return best
+}
+
+// How many contracts to ask a combo's makers for (2026-11-23). A request by
+// dollar amount came back with every quote sized 0 (Kalshi puts that size in
+// other fields), so the request names a count: the most contracts that fit
+// the budget at the highest price we would ever take, our chance less the
+// edge minimum. Any quote we accept then costs no more than the budget.
+export function comboRfqContracts(budgetUsd: number, chance: number, minEdgePp: number, maxContracts: number): number {
+  const ceilingC = Math.min(99, Math.max(1, chance * 100 - minEdgePp))
+  return Math.max(0, Math.min(maxContracts, Math.floor((budgetUsd * 100) / ceilingC + 1e-9)))
 }
 
 // Whether a live fill matches the price the reading predicted, to the cent.
