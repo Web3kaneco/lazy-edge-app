@@ -71,6 +71,20 @@ describe('starter updates offer only what the starter changed', () => {
     expect(next).toMatchObject({ entry: { priceBandC: [1, 99], minChancePct: { pregame: 0 } }, size: { maxTradeUsd: 20 }, pollS: 30 })
   })
 
+  // 2026-11-26: every public copy of NBA Props comes from 0.9.1 (pregame on,
+  // Q1 to Q4, no top players, no edge cap, no under band).
+  it("a 0.9.1 copy of NBA Props takes 0.10.0's rules and keeps its money", () => {
+    const mine = starter('nba-props')
+    mine.market.phase = 'both'; mine.market.quarters = ['Q1', 'Q2', 'Q3', 'Q4']; mine.market.propTopPlayers = null; mine.market.propSidesOff = []
+    mine.entry.maxEdgePp = null; mine.entry.underEdgePp = null; mine.size.maxTradeUsd = 25
+    expect(starterVersion('nba-props')).toBe(3)
+    const next = withStarterUpdate(mine, starter('nba-props'), 'nba-props')
+    expect(next).toMatchObject({
+      market: { phase: 'live', quarters: ['Q3', 'Q4'], propTopPlayers: 10, propSidesOff: ['REB under'] },
+      entry: { maxEdgePp: 15, underEdgePp: [5, 7] }, size: { maxTradeUsd: 25 }
+    })
+  })
+
   it('a reset to the starter keeps money and venues too', () => {
     const mine = starter('nba-live'); mine.size.maxTradeUsd = 40; mine.guards.maxDailyDrawdownUsd = 200; mine.market.venues = ['kalshi']; mine.entry.minEdgePp = 9
     const r = withStarter(mine, starter('nba-live'))

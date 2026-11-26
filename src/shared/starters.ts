@@ -345,8 +345,11 @@ const strategyOf = (b: BotSettings): Omit<BotSettings, 'id' | 'name' | 'enabled'
 // Money is never listed: an update never changes size, sizing, the loss stop
 // or venues. A starter with no entry has never changed (version 1).
 export const STARTER_UPDATES: Record<string, { version: number; fields: string[] }> = {
-  // 0.9.2: in game only, the 2nd to 4th quarters, 60% or more to hit.
-  'nba-props': { version: 2, fields: ['market.phase', 'market.quarters', 'entry.minChancePct'] },
+  // 0.10.0: the rules graded live since 24 November: Q3 and Q4, the top ten
+  // players, edge 3 to 15, unders only at 5 to 7, no rebound unders. 0.9.2's
+  // in game only at 60% is listed again, since 0.9.2 never shipped publicly
+  // and every public copy comes from 0.9.1.
+  'nba-props': { version: 3, fields: ['market.phase', 'market.quarters', 'entry.minChancePct', 'market.propTopPlayers', 'market.propSidesOff', 'entry.maxEdgePp', 'entry.underEdgePp'] },
   // 0.9.2: every pregame pick, whatever the chance or the price, one a game.
   'nba-pick-pregame': { version: 2, fields: ['market.labels', 'entry.pickGapPp', 'entry.minChancePct', 'entry.priceBandC', 'entry.maxPriceAgeS', 'guards.oneEntryPerGame'] }
 }
