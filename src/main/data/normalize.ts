@@ -712,16 +712,23 @@ export function nbaProps(body: unknown, now: number): Normalized {
       for (const s of PROP_STATS) {
         const line = num(p[`${s.pre}market_line`])
         if (line === null) continue
-        const ticker = p[`${s.key}_market_id`] ? String(p[`${s.key}_market_id`]) : ''
-        if (String(p[`${s.key}_venue`] ?? '').toLowerCase() !== 'kalshi' || !ticker) { out.refused.push({ source: 'nba.props', reason: 'no Kalshi contract' }); continue }
+        // The API's own Kalshi contract when it gives one. From 27 November it
+        // names Polymarket's market or none, so a prop without one is kept with
+        // no contract and matched to Kalshi's market at the same line in the
+        // supervisor (data/nbakalshi.ts); one that cannot be matched is
+        // refused there.
+        const kalshi = String(p[`${s.key}_venue`] ?? '').toLowerCase() === 'kalshi' && Boolean(p[`${s.key}_market_id`])
+        const ticker = kalshi ? String(p[`${s.key}_market_id`]) : ''
         const pOver = num(live ? p[`${s.pre}likelihood_over`] : p[`${s.key}_sim_p_over`])
         if (pOver === null || pOver <= 0 || pOver >= 1) { out.refused.push({ source: 'nba.props', reason: 'no chance of the over' }); continue }
         // A live book wider than 10 cents is marked thin by the API; its mid
         // is not a price anyone can trade at, so the play is refused.
         if (live && String(p[`${s.key}_live_source`] ?? '').toLowerCase() === 'thin') { out.refused.push({ source: 'nba.props', reason: 'book too thin, wider than 10 cents' }); continue }
         const over = pOver >= 0.5
-        const price = num(p[`${s.key}_live_price`])
-        const edge = num(p[`${s.key}_live_edge_pp`])
+        // A price or edge the API read off another venue's book is not
+        // Kalshi's; the live requote reads Kalshi's own.
+        const price = kalshi ? num(p[`${s.key}_live_price`]) : null
+        const edge = kalshi ? num(p[`${s.key}_live_edge_pp`]) : null
         const sofar = live ? num(p[s.now]) : null
         const ourP = over ? pOver : 1 - pOver
         // Off the floor: the projection already counts only his chance of
@@ -733,7 +740,7 @@ export function nbaProps(body: unknown, now: number): Normalized {
         const as = num(g.away_score)
         const teamLead = live && home !== null && hs !== null && as !== null ? (home ? hs - as : as - hs) : null
         out.signals.push({
-          key: `nba:${gid}:PROP:${ticker}`, sport: 'NBA', lane: 'PROP',
+          key: ticker ? `nba:${gid}:PROP:${ticker}` : `nba:${gid}:PROP:unmatched:${name}:${s.key}:${line}`, sport: 'NBA', lane: 'PROP',
           phase: live ? 'live' : 'pregame', gameId: gid,
           title: `${matchup ?? ''} ${name} ${over ? 'over' : 'under'} ${line} ${s.label}`.trim(),
           signalType: over ? 'BUY_OVER' : 'BUY_UNDER', explicitSide: over ? 'yes' : 'no',
@@ -742,11 +749,11 @@ export function nbaProps(body: unknown, now: number): Normalized {
           // The live edge is ours minus the mid on the over; the under is its mirror.
           edgePp: edge === null ? null : over ? edge : -edge,
           label: 'PRICE_GAP', kelly: null, trigger: false, measured: false, clock,
-          quotes: [{ venue: 'kalshi', contract: ticker, side: over ? 'yes' : 'no', ask: null, askSize: null, priceAgeS: null }],
+          quotes: ticker ? [{ venue: 'kalshi', contract: ticker, side: over ? 'yes' : 'no', ask: null, askSize: null, priceAgeS: null }] : [],
           why: `${Math.round(ourP * 100)}% to go ${over ? 'over' : 'under'} ${line}${sofar !== null ? `, ${sofar} so far` : ''}${back !== null ? `; on the bench, ${Math.round(back * 100)}% to come back tonight` : ''}`,
           receivedAt: now, matchup,
           prop: {
-            line, soFar: sofar, over, teamLead, rank,
+            line, soFar: sofar, over, teamLead, rank, player: name, stat: s.key,
             ...(live ? { statsAt: epochMs(p.updated_at), pricedAt: epochMs(p.c2_priced_at), liveModel: p.live_model ? String(p.live_model) : null, minutes: num(p.minutes_played) } : {})
           }
         })

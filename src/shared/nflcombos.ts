@@ -82,7 +82,7 @@ export function kalshiRungs(event: string, markets: unknown): KalshiRung[] {
 export function nameKey(name: string): string {
   return name.toLowerCase().replace(/\b(jr|sr|ii|iii|iv|v)\b\.?/g, '').replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim()
 }
-const initialKey = (name: string): string => { const k = nameKey(name).split(' '); return k.length > 1 ? `${k[0]![0]} ${k[k.length - 1]}` : k[0] ?? '' }
+export const initialKey = (name: string): string => { const k = nameKey(name).split(' '); return k.length > 1 ? `${k[0]![0]} ${k[k.length - 1]}` : k[0] ?? '' }
 
 // The Kalshi game code (26NOV22NYJLAC) from a Kalshi game ticker.
 export const kalshiGameCode = (ticker: string | undefined): string | null => {
