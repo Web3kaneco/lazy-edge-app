@@ -453,9 +453,14 @@ describe('NBA player props, 2026-11-16', () => {
     expect(nbaProps(game({}, { availability: 'OUT' }), 0).signals).toHaveLength(0)
   })
 
-  it('refuses a stat with no Kalshi contract rather than guessing', () => {
+  // 2026-11-27: a stat without a Kalshi contract is kept with none, to be
+  // matched to Kalshi's market at the same line (tests/nba-kalshi-props),
+  // and never trades on another venue's id.
+  it('never trades a stat on a contract that is not Kalshi', () => {
     const out = nbaProps(game({}, { pts_venue: 'fanduel' }), 0)
-    expect(out.refused).toContainEqual({ source: 'nba.props', reason: 'no Kalshi contract' })
+    const pts = out.signals.find((s) => s.prop?.stat === 'pts')!
+    expect(pts.quotes).toEqual([])
+    expect(pts.key).toContain(':PROP:unmatched:')
   })
 
   // The API audit, 2026-11-20: a live book past 10 cents wide is marked thin.

@@ -77,7 +77,7 @@ export interface Signal {
   // its poller last wrote his box line (updated_at), pricedAt when c2 worked
   // out his chance (c2_priced_at), both epoch ms; liveModel c2 or formula;
   // minutes his minutes so far. Missing or null when the feed gives none.
-  prop?: { line: number; soFar: number | null; over: boolean; teamLead: number | null; rank?: number | null; statsAt?: number | null; pricedAt?: number | null; liveModel?: string | null; minutes?: number | null }
+  prop?: { line: number; soFar: number | null; over: boolean; teamLead: number | null; rank?: number | null; player?: string; stat?: 'pts' | 'reb' | 'ast'; statsAt?: number | null; pricedAt?: number | null; liveModel?: string | null; minutes?: number | null }
   // What happened just before the play (shared/trail.ts), set on the live
   // requote. Recorded only; no gate reads it.
   trail?: Trail

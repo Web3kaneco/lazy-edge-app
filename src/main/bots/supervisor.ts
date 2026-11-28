@@ -34,6 +34,7 @@ import { settingsStore } from '../store/settings'
 import { terms } from '../store/terms'
 import { KalshiVenue } from '../venues/kalshi'
 import { fillNflMoneylines, mapNflHotLines, mapNflHotProps, nflLadderEvents, nflPropEvents } from '../data/nflkalshi'
+import { mapNbaProps, nbaGameCodes, nbaPropEvents } from '../data/nbakalshi'
 import { PaperVenue } from '../venues/paper'
 import { PolymarketVenue } from '../venues/polymarket'
 import type { Venue } from '../venues/types'
@@ -507,12 +508,34 @@ export class Supervisor extends EventEmitter {
       if (!this.nbaPropsCache || now - this.nbaPropsCache.at > NBA_PROPS_EVERY_MS) {
         try {
           this.nbaPropsCache = { at: now, body: await lazyedge.nbaProps() }
+          keepSample('nba-props', this.nbaPropsCache.body, now)
         } catch (err) {
           if (err instanceof NotSignedInError || err instanceof PlanInactiveError) throw err
           out.refused.push({ source: 'nba.props', reason: (err as Error).message.slice(0, 80) })
+          keepSample('nba-props-error', { error: (err as Error).message }, now)
         }
       }
-      if (this.nbaPropsCache) add(nbaProps(this.nbaPropsCache.body, this.nbaPropsCache.at))
+      if (this.nbaPropsCache) {
+        const n = nbaProps(this.nbaPropsCache.body, this.nbaPropsCache.at)
+        // Props the API gave no Kalshi contract take Kalshi's market for the
+        // same player and line (data/nbakalshi.ts). The game codes come from
+        // the NBA game tickers the other feeds carried this cycle.
+        const codes = nbaGameCodes(out.signals)
+        const rungs = new Map<string, KalshiRung[]>()
+        for (const event of nbaPropEvents(n, codes)) {
+          const markets = await (this.venues.kalshi as KalshiVenue).eventMarkets(event)
+          // A settled rung is no longer a market.
+          const open = (markets ?? []).filter((m: any) => !m?.status || ['active', 'open'].includes(String(m.status)))
+          if (markets) rungs.set(event, kalshiRungs(event, open))
+        }
+        const matched = mapNbaProps(n, codes, rungs)
+        // What the reader made of the reply, beside the reply itself
+        // (2026-11-27: a night of NBA games with no prop reaching any bot).
+        const why: Record<string, number> = {}
+        for (const r of n.refused) why[r.reason.replace(/^.* has no /, 'player has no ').replace(/line at [\d.]+/, 'line at that number')] = (why[r.reason.replace(/^.* has no /, 'player has no ').replace(/line at [\d.]+/, 'line at that number')] ?? 0) + 1
+        keepSample('nba-props-read', { signals: n.signals.length, matchedToKalshi: matched, games: codes.size, refused: why }, now)
+        add(n)
+      }
     })
     if (sports.has('WC')) {
       // Not wired yet: shown as refused so the gap is visible rather than
